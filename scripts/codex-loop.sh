@@ -16,6 +16,7 @@ FIELD_SEP=$'\034'
 DYNAMIC_INITIAL_SECONDS=600
 DYNAMIC_MIN_SECONDS=60
 DYNAMIC_MAX_SECONDS=3600
+REFLECTION_ENABLED="${CODEX_LOOP_REFLECTION:-1}"
 
 usage() {
   cat <<'EOF'
@@ -370,6 +371,56 @@ CODEX_LOOP_NEXT_REASON=<one short reason for the chosen delay>
 Choose the delay based on urgency, expected external latency, and how soon useful new work can be done.
 EOF
   fi
+
+  if [[ "$REFLECTION_ENABLED" != "0" ]]; then
+    cat <<'EOF'
+
+Codex-loop reflection instruction:
+At the end of your final response, include this compact reflection section:
+LOOP_REFLECTION_TARGET=<what changed about the loop target or its state>
+LOOP_REFLECTION_SELF=<one improvement or risk for this loop, prompt, or skill; write none if none>
+LOOP_REFLECTION_PROMPT=<one concrete prompt/skill adjustment to consider; write none if none>
+LOOP_REFLECTION_NEXT=<the smallest useful next action or verification>
+Do not edit the loop skill, loop prompt, or persistent config unless the user or current loop prompt explicitly authorizes self-improvement edits. If authorized, keep the patch narrow and verify it.
+EOF
+  fi
+}
+
+extract_keyed_line() {
+  local file="$1"
+  local key="$2"
+  [[ -f "$file" ]] || return 1
+  awk -v key="$key" -F= '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      value=$0
+      sub(/^[^=]*=/, "", value)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      found=value
+    }
+    END {
+      if (found != "") print found
+    }
+  ' "$file"
+}
+
+record_loop_reflection() {
+  local jobdir="$1"
+  local message_file="$jobdir/last_message.txt"
+  local target self prompt next
+  target="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_TARGET" || true)"
+  self="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_SELF" || true)"
+  prompt="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_PROMPT" || true)"
+  next="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_NEXT" || true)"
+  [[ -n "$target$self$prompt$next" ]] || return 0
+
+  {
+    printf '[%s] job=%s run=%s\n' "$(now_iso)" "${JOB_ID:-}" "${RUN_COUNT:-}"
+    printf 'target=%s\n' "$target"
+    printf 'self=%s\n' "$self"
+    printf 'prompt=%s\n' "$prompt"
+    printf 'next=%s\n\n' "$next"
+  } >>"$jobdir/reflection.log"
 }
 
 parse_duration_to_seconds() {
@@ -937,6 +988,8 @@ run_job_once() {
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
     fi
 
+    record_loop_reflection "$jobdir"
+
     if [[ "${STATUS:-active}" == "active" && "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
       STATUS="completed"
       NEXT_RUN_EPOCH="0"
@@ -1111,6 +1164,7 @@ create_job() {
   : >"$jobdir/last_message.txt"
   : >"$jobdir/last_run.jsonl"
   : >"$jobdir/runtime_prompt.txt"
+  : >"$jobdir/reflection.log"
   : >"$jobdir/worker.log"
 
   JOB_ID="$job_id"
@@ -1310,6 +1364,7 @@ ensure_job() {
       : >"$selected/last_message.txt"
       : >"$selected/last_run.jsonl"
       : >"$selected/runtime_prompt.txt"
+      : >"$selected/reflection.log"
       LAST_NOTE="spec updated; session reset"
     elif [[ -n "$note" ]]; then
       LAST_NOTE="$note"
@@ -1420,6 +1475,7 @@ $(base_prompt_for_job "$jobdir")
 Artifacts:
   $jobdir/prompt.txt
   $jobdir/runtime_prompt.txt
+  $jobdir/reflection.log
   $jobdir/run.log
   $jobdir/stderr.log
   $jobdir/last_message.txt

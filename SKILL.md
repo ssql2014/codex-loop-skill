@@ -78,9 +78,11 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
 - Detached `exec` mode is disabled. Historical jobs with `MODE=exec` are blocked at runtime instead of launching detached Codex.
 - No overlap per job. A loop never spawns multiple concurrent Codex runs for the same job.
+- Reflection is on by default. Each fired prompt asks Codex to include compact `LOOP_REFLECTION_*` lines about the loop target, the loop/prompt/skill itself, a prompt/skill adjustment to consider, and the next smallest action. Captured reflections are appended to `reflection.log` when terminal output can be read.
+- Reflection is safe-by-default: do not edit the loop skill, loop prompt, or persistent config unless the user or current loop prompt explicitly authorizes self-improvement edits.
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
-  `prompt.txt`, `runtime_prompt.txt`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
+  `prompt.txt`, `runtime_prompt.txt`, `reflection.log`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
 - The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`; `loop` no longer depends on the separate `auto-continue` skill.
 
 ## Response Pattern
