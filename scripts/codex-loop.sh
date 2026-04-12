@@ -10,6 +10,7 @@ SEND_CURRENT_BIN="${CODEX_LOOP_SEND_CURRENT_BIN:-$SEND_CURRENT_BIN_DEFAULT}"
 DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
+TERMINAL_ASAP_QUEUE_DELAY="${CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY:-30}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
@@ -579,11 +580,11 @@ schedule_next_run() {
   local note=""
 
   if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
-    seconds=0
-    note="asap schedule; next run immediately"
+    seconds="$TERMINAL_ASAP_QUEUE_DELAY"
+    note="asap schedule; next run after queue throttle ${TERMINAL_ASAP_QUEUE_DELAY}s"
     INTERVAL_INPUT="asap"
-    INTERVAL_SECONDS="0"
-    INTERVAL_LABEL="$(format_schedule_label asap 0)"
+    INTERVAL_SECONDS="$TERMINAL_ASAP_QUEUE_DELAY"
+    INTERVAL_LABEL="$(format_schedule_label asap "$TERMINAL_ASAP_QUEUE_DELAY")"
   elif [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" ]]; then
     local delay_spec delay_seconds reason
     delay_spec="$(extract_dynamic_delay "$jobdir/last_message.txt" || true)"
