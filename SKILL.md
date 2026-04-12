@@ -17,6 +17,16 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 5. Target binding must be reliable. If the target Codex session is inside tmux, prefer `--tmux-pane %NN` or create the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain Terminal tab, use `--tty /dev/ttysNNN`, `--window-id ID`, or `--title-pattern TEXT`; do not rely on front-window guessing.
 6. The background worker only schedules and queues Terminal input. The actual reasoning and tool work happen in the current Terminal Codex session.
 
+## Pre-Send Idle Gate
+
+Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detection as a hard gate:
+
+- Only send after the previous turn has produced a final assistant response or the target pane/tab has returned to a prompt-ready idle state.
+- If the target is still running a tool, streaming output, waiting on SSH/test results, or has not emitted a final response, do not paste or press Return; wait and re-check.
+- If idle detection is ambiguous, skip that fire rather than risk appending a prompt into an active turn. Record the skip in the job log.
+- Prefer a terminal-orchestrator/tmux `read/check` style status check for tmux targets, or the loop runner's bound TTY/window idle detector for Terminal tabs. Do not use fixed wall-clock cadence alone as proof of readiness.
+- For fragile long-running jobs, use a per-job lock or state file around prompt injection: create it when a turn is sent, clear it only after the turn is observed idle/final, and skip sends while it exists.
+
 ## Commands
 
 - Create a loop:
