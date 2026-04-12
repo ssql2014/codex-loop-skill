@@ -12,6 +12,7 @@ TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
 TERMINAL_ASAP_QUEUE_DELAY="${CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY:-30}"
 TERMINAL_ASAP_REQUIRE_BUSY="${CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY:-0}"
+TERMINAL_ASAP_BUSY_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_BUSY_TIMEOUT:-3}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
@@ -1063,7 +1064,7 @@ run_job_once() {
       if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
-        "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-busy-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+        "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_BUSY_TIMEOUT" --wait-busy-only --print-contents >"$last_message_file" 2>>"$stderr_file"
         rc="$?"
         set -e
         LAST_EXIT_CODE="$rc"
