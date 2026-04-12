@@ -377,6 +377,7 @@ EOF
 
 Codex-loop reflection instruction:
 At the end of your final response, include this compact reflection section:
+LOOP_REFLECTION_OBJECTIVE=<on-track or deviating; compare against the original loop objective and explain any drift in one short phrase>
 LOOP_REFLECTION_TARGET=<what changed about the loop target or its state>
 LOOP_REFLECTION_SELF=<one improvement or risk for this loop, target project, active skills, prompts, workflow docs, or repo instructions; write none if none>
 LOOP_REFLECTION_PROMPT=<one concrete adjustment to a relevant prompt, skill, workflow doc, repo instruction, or this loop; write none if none>
@@ -406,10 +407,11 @@ extract_keyed_line() {
 
 update_loop_state() {
   local jobdir="$1"
-  local target="$2"
-  local self="$3"
-  local prompt="$4"
-  local next="$5"
+  local objective="$2"
+  local target="$3"
+  local self="$4"
+  local prompt="$5"
+  local next="$6"
   local tmp="$jobdir/state.md.tmp.$$.$RANDOM"
   local recent=""
 
@@ -423,6 +425,9 @@ Generated: $(now_iso)
 
 ## Goal
 $(job_prompt_preview "$jobdir")
+
+## Objective Drift Check
+${objective:-not reported}
 
 ## Constraints & Preferences
 - Job: ${JOB_ID:-}${JOB_NAME:+ (${JOB_NAME})}
@@ -478,22 +483,24 @@ EOF
 record_loop_reflection() {
   local jobdir="$1"
   local message_file="$jobdir/last_message.txt"
-  local target self prompt next
+  local objective target self prompt next
+  objective="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_OBJECTIVE" || true)"
   target="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_TARGET" || true)"
   self="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_SELF" || true)"
   prompt="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_PROMPT" || true)"
   next="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_NEXT" || true)"
-  [[ -n "$target$self$prompt$next" ]] || return 0
+  [[ -n "$objective$target$self$prompt$next" ]] || return 0
 
   {
     printf '[%s] job=%s run=%s\n' "$(now_iso)" "${JOB_ID:-}" "${RUN_COUNT:-}"
+    printf 'objective=%s\n' "$objective"
     printf 'target=%s\n' "$target"
     printf 'self=%s\n' "$self"
     printf 'prompt=%s\n' "$prompt"
     printf 'next=%s\n\n' "$next"
   } >>"$jobdir/reflection.log"
 
-  update_loop_state "$jobdir" "$target" "$self" "$prompt" "$next"
+  update_loop_state "$jobdir" "$objective" "$target" "$self" "$prompt" "$next"
 }
 
 parse_duration_to_seconds() {
