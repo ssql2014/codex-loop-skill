@@ -12,6 +12,7 @@ TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
 TERMINAL_ASAP_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT:-0}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
+TERMINAL_REQUIRE_END_TAG_DEFAULT="${CODEX_LOOP_TERMINAL_REQUIRE_END_TAG:-0}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
 DYNAMIC_INITIAL_SECONDS=600
@@ -22,13 +23,13 @@ REFLECTION_ENABLED="${CODEX_LOOP_REFLECTION:-1}"
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -178,6 +179,7 @@ load_job() {
   SCHEDULE_MODE="fixed"
   PROMPT_SOURCE="inline"
   MAX_RUNS="0"
+  REQUIRE_END_TAG="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
   # shellcheck disable=SC1090
   source "$jobdir/meta.env"
   MODE="${MODE:-terminal}"
@@ -189,6 +191,8 @@ load_job() {
   SCHEDULE_MODE="${SCHEDULE_MODE:-fixed}"
   PROMPT_SOURCE="${PROMPT_SOURCE:-inline}"
   MAX_RUNS="${MAX_RUNS:-0}"
+  REQUIRE_END_TAG="${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}"
+  validate_bool_flag "$REQUIRE_END_TAG" "REQUIRE_END_TAG"
 }
 
 save_job() {
@@ -218,6 +222,7 @@ TARGET_TITLE_PATTERN='$(escape_squotes "${TARGET_TITLE_PATTERN:-}")'
 TARGET_TTY='$(escape_squotes "${TARGET_TTY:-}")'
 TARGET_TMUX_PANE='$(escape_squotes "${TARGET_TMUX_PANE:-}")'
 SEND_DELAY='$(escape_squotes "${SEND_DELAY:-0}")'
+REQUIRE_END_TAG='$(escape_squotes "${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}")'
 SCHEDULE_MODE='$(escape_squotes "${SCHEDULE_MODE:-fixed}")'
 PROMPT_SOURCE='$(escape_squotes "${PROMPT_SOURCE:-inline}")'
 MAX_RUNS='$(escape_squotes "${MAX_RUNS:-0}")'
@@ -248,6 +253,52 @@ validate_non_negative_number() {
   local value="$1"
   local label="$2"
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$label must be a non-negative number: $value"
+}
+
+bool_enabled() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_bool_flag() {
+  local value="${1:-0}"
+  local label="$2"
+  case "$value" in
+    0|1|true|TRUE|false|FALSE|yes|YES|no|NO|on|ON|off|OFF) ;;
+    *) die "$label must be boolean-like (0/1/true/false/on/off): $value" ;;
+  esac
+}
+
+last_message_has_end_tag() {
+  local file="$1"
+  [[ -s "$file" ]] || return 1
+  awk '
+    {
+      line = tolower($0)
+      while (match(line, /\[(start|end)[[:space:]][^][]+\]/)) {
+        last = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    END {
+      exit (last ~ /^\[end[[:space:]]/) ? 0 : 1
+    }
+  ' "$file"
+}
+
+schedule_end_tag_retry() {
+  local jobdir="$1"
+  local note="$2"
+  local seconds="${INTERVAL_SECONDS:-60}"
+  if ! [[ "$seconds" =~ ^[0-9]+$ ]] || (( seconds < 60 )); then
+    seconds=60
+  fi
+  NEXT_RUN_EPOCH=$(( $(now_epoch) + seconds ))
+  NEXT_RUN_AT="$(epoch_to_local "$NEXT_RUN_EPOCH")"
+  LAST_NOTE="$note; retry after ${seconds}s"
+  save_job "$jobdir"
 }
 
 validate_positive_integer() {
@@ -1040,6 +1091,9 @@ run_job_once() {
     elif [[ "$REFLECTION_ENABLED" != "0" ]]; then
       capture_terminal_output=1
     fi
+    if bool_enabled "${REQUIRE_END_TAG:-0}"; then
+      capture_terminal_output=1
+    fi
 
     started_at="$(now_iso)"
     LAST_RUN_STARTED_AT="$started_at"
@@ -1050,6 +1104,32 @@ run_job_once() {
 
     prompt_preview="$(job_prompt_preview "$jobdir")"
     echo "[$started_at] start mode=terminal interval=$INTERVAL_INPUT target_tmux_pane=${TARGET_TMUX_PANE:-} target_window=${TARGET_WINDOW_ID:-} target_title=${TARGET_TITLE_PATTERN:-} target_tty=${TARGET_TTY:-} prompt=$prompt_preview" >>"$jobdir/run.log"
+
+    if bool_enabled "${REQUIRE_END_TAG:-0}" && [[ "${RUN_COUNT:-0}" != "0" ]]; then
+      local gate_rc gate_note
+      set +e
+      "${target_cmd[@]}" --idle-timeout "$TERMINAL_IDLE_TIMEOUT" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+      gate_rc="$?"
+      set -e
+      if [[ "$gate_rc" -ne 0 ]]; then
+        rc="$gate_rc"
+        LAST_RUN_FINISHED_AT="$(now_iso)"
+        LAST_EXIT_CODE="$rc"
+        gate_note="waiting for target idle before [end xxx] gate"
+        schedule_end_tag_retry "$jobdir" "$gate_note"
+        echo "[$LAST_RUN_FINISHED_AT] skip rc=$rc next=$NEXT_RUN_AT message=$gate_note" >>"$jobdir/run.log"
+        return 0
+      fi
+      if ! last_message_has_end_tag "$last_message_file"; then
+        rc="75"
+        LAST_RUN_FINISHED_AT="$(now_iso)"
+        LAST_EXIT_CODE="$rc"
+        gate_note="waiting for latest session [end xxx] tag before sending next loop cycle"
+        schedule_end_tag_retry "$jobdir" "$gate_note"
+        echo "[$LAST_RUN_FINISHED_AT] skip rc=$rc next=$NEXT_RUN_AT message=$gate_note" >>"$jobdir/run.log"
+        return 0
+      fi
+    fi
 
     : >"$json_file"
     : >"$last_message_file"
@@ -1186,6 +1266,7 @@ create_job() {
   local target_tmux_pane=""
   local send_delay="0"
   local max_runs="0"
+  local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1249,6 +1330,14 @@ create_job() {
         validate_non_negative_number "$send_delay" "--send-delay"
         shift 2
         ;;
+      --require-end-tag)
+        require_end_tag="1"
+        shift
+        ;;
+      --no-require-end-tag)
+        require_end_tag="0"
+        shift
+        ;;
       --)
         shift
         break
@@ -1263,6 +1352,7 @@ create_job() {
   [[ -d "$cwd" ]] || die "working directory not found: $cwd"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
+  validate_bool_flag "$require_end_tag" "--require-end-tag"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
@@ -1320,6 +1410,7 @@ create_job() {
   TARGET_TTY="$target_tty"
   TARGET_TMUX_PANE="$target_tmux_pane"
   SEND_DELAY="$send_delay"
+  REQUIRE_END_TAG="$require_end_tag"
   SCHEDULE_MODE="$schedule_mode"
   PROMPT_SOURCE="$prompt_source"
   LAST_NOTE="$note"
@@ -1340,6 +1431,7 @@ Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
+Require end tag: ${REQUIRE_END_TAG:-0}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$jobdir")
 EOF
@@ -1362,6 +1454,7 @@ ensure_job() {
   local target_tmux_pane=""
   local send_delay="0"
   local max_runs="0"
+  local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1425,6 +1518,14 @@ ensure_job() {
         validate_non_negative_number "$send_delay" "--send-delay"
         shift 2
         ;;
+      --require-end-tag)
+        require_end_tag="1"
+        shift
+        ;;
+      --no-require-end-tag)
+        require_end_tag="0"
+        shift
+        ;;
       --)
         shift
         break
@@ -1442,6 +1543,7 @@ ensure_job() {
   cwd="$(cd "$cwd" && pwd)"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
+  validate_bool_flag "$require_end_tag" "--require-end-tag"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
@@ -1461,7 +1563,7 @@ ensure_job() {
   if selected="$(resolve_jobdir "$job_name" 2>/dev/null)"; then
     load_job "$selected"
     selected_prompt="$(cat "$selected/prompt.txt" 2>/dev/null || true)"
-    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${TARGET_TMUX_PANE:-}" != "$target_tmux_pane" || "${SEND_DELAY:-0}" != "$send_delay" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
+    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${TARGET_TMUX_PANE:-}" != "$target_tmux_pane" || "${SEND_DELAY:-0}" != "$send_delay" || "${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}" != "$require_end_tag" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
       spec_changed=1
     fi
 
@@ -1476,6 +1578,7 @@ ensure_job() {
     TARGET_TTY="$target_tty"
     TARGET_TMUX_PANE="$target_tmux_pane"
     SEND_DELAY="$send_delay"
+    REQUIRE_END_TAG="$require_end_tag"
     MAX_RUNS="$max_runs"
     SCHEDULE_MODE="$schedule_mode"
     PROMPT_SOURCE="$prompt_source"
@@ -1525,6 +1628,7 @@ Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
+Require end tag: ${REQUIRE_END_TAG:-0}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$selected")
 EOF
@@ -1532,6 +1636,11 @@ EOF
   fi
 
   local -a create_args=(--name "$job_name" --cwd "$cwd" --mode "$mode" --send-delay "$send_delay")
+  if bool_enabled "$require_end_tag"; then
+    create_args+=(--require-end-tag)
+  else
+    create_args+=(--no-require-end-tag)
+  fi
   if (( start_now )); then
     create_args+=(--start-now)
   fi
@@ -1602,6 +1711,7 @@ Next run: ${NEXT_RUN_AT:-}
 Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Send delay: ${SEND_DELAY:-0}
+Require end tag: ${REQUIRE_END_TAG:-0}
 Session id: ${SESSION_ID:-}
 Worker pid: ${PID:-}
 Child pid: ${CURRENT_CHILD_PID:-}

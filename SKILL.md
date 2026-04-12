@@ -26,6 +26,7 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 - If idle detection is ambiguous, skip that fire rather than risk appending a prompt into an active turn. Record the skip in the job log.
 - Prefer a terminal-orchestrator/tmux `read/check` style status check for tmux targets, or the loop runner's bound TTY/window idle detector for Terminal tabs. Do not use fixed wall-clock cadence alone as proof of readiness.
 - For fragile long-running jobs, use a per-job lock or state file around prompt injection: create it when a turn is sent, clear it only after the turn is observed idle/final, and skip sends while it exists.
+- For session-loop workflows that tag complete conversations with `[start xxx]` and `[end xxx]`, pass `--require-end-tag`. The first cycle may send normally; later cycles must capture the target output and require the latest `[start ...]`/`[end ...]` tag to be an `[end xxx]` tag before sending the next prompt. If the latest tag is a `[start xxx]` or no end tag is visible, skip and retry instead of pasting or pressing Return.
 
 ## Commands
 
@@ -38,6 +39,9 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 - Create or ensure a loop that sends the prompt back into a Terminal Codex session:
   `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
   Use `--tmux-pane %NN` when the target Codex session is inside tmux; this is preferred over Terminal focus. Use `--tty /dev/ttysNNN` for a Terminal tab outside tmux, or `--title-pattern TEXT` when the Terminal title is stable.
+- Create or ensure a session-tag gated loop:
+  `codex-loop ensure --name JOB_NAME --mode terminal --tmux-pane %NN --require-end-tag --cwd "$PWD" -- "<raw loop input>"`
+  Use this for recurring Codex sessions that emit `[start xxx]` at the beginning of a full session and `[end xxx]` only after the final response is complete.
 - List loops:
   `codex-loop list`
 - Show details for one loop:
@@ -70,7 +74,7 @@ Mirror Claude's `/loop` surface syntax:
 
 Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
-`asap` mode schedules the next iteration immediately, but terminal mode still waits until the bound target appears idle before injecting the prompt. This avoids appending a new prompt into an active Codex turn. After sending, ASAP waits for the turn to go busy and then idle again before scheduling the next immediate fire. The turn wait defaults to no timeout and can be bounded with `CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT`.
+`asap` mode schedules the next iteration immediately, but terminal mode still waits until the bound target appears idle before injecting the prompt. If `--require-end-tag` is enabled, terminal mode also waits until the latest session tag is `[end xxx]`. This avoids appending a new prompt into an active Codex turn. After sending, ASAP waits for the turn to go busy and then idle again before scheduling the next immediate fire. The turn wait defaults to no timeout and can be bounded with `CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT`.
 
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
@@ -82,7 +86,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
-  - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately, but each terminal send waits for the target to be idle first, then waits for that turn to complete before scheduling the next immediate run. This preserves "never stop" without interrupting the active turn.
+  - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately, but each terminal send waits for the target to be idle first, then waits for that turn to complete before scheduling the next immediate run. With `--require-end-tag`, it also requires the latest observed session tag to be `[end xxx]` before sending the next cycle. This preserves "never stop" without interrupting the active turn.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
