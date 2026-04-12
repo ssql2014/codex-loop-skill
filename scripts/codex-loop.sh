@@ -18,13 +18,13 @@ DYNAMIC_MAX_SECONDS=3600
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -168,6 +168,7 @@ load_job() {
   MODE="terminal"
   TARGET_WINDOW_ID=""
   TARGET_TITLE_PATTERN=""
+  TARGET_TTY=""
   SEND_DELAY="0"
   SCHEDULE_MODE="fixed"
   PROMPT_SOURCE="inline"
@@ -176,6 +177,7 @@ load_job() {
   MODE="${MODE:-terminal}"
   TARGET_WINDOW_ID="${TARGET_WINDOW_ID:-}"
   TARGET_TITLE_PATTERN="${TARGET_TITLE_PATTERN:-}"
+  TARGET_TTY="${TARGET_TTY:-}"
   SEND_DELAY="${SEND_DELAY:-0}"
   SCHEDULE_MODE="${SCHEDULE_MODE:-fixed}"
   PROMPT_SOURCE="${PROMPT_SOURCE:-inline}"
@@ -205,6 +207,7 @@ CURRENT_CHILD_PID='$(escape_squotes "${CURRENT_CHILD_PID:-}")'
 MODE='$(escape_squotes "${MODE:-terminal}")'
 TARGET_WINDOW_ID='$(escape_squotes "${TARGET_WINDOW_ID:-}")'
 TARGET_TITLE_PATTERN='$(escape_squotes "${TARGET_TITLE_PATTERN:-}")'
+TARGET_TTY='$(escape_squotes "${TARGET_TTY:-}")'
 SEND_DELAY='$(escape_squotes "${SEND_DELAY:-0}")'
 SCHEDULE_MODE='$(escape_squotes "${SCHEDULE_MODE:-fixed}")'
 PROMPT_SOURCE='$(escape_squotes "${PROMPT_SOURCE:-inline}")'
@@ -237,17 +240,31 @@ validate_non_negative_number() {
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$label must be a non-negative number: $value"
 }
 
+current_tty() {
+  local tty_value
+  tty_value="$(tty 2>/dev/null || true)"
+  [[ "$tty_value" == /dev/ttys* || "$tty_value" == /dev/pts/* ]] || return 1
+  printf '%s' "$tty_value"
+}
+
 resolve_terminal_target() {
   local mode="$1"
   local window_id="$2"
   local title_pattern="$3"
+  local target_tty="$4"
 
   [[ "$mode" == "terminal" ]] || return 0
-  [[ -z "$window_id" || -z "$title_pattern" ]] || die "--window-id and --title-pattern are mutually exclusive"
+  local target_count=0
+  [[ -z "$window_id" ]] || target_count=$((target_count + 1))
+  [[ -z "$title_pattern" ]] || target_count=$((target_count + 1))
+  [[ -z "$target_tty" ]] || target_count=$((target_count + 1))
+  (( target_count <= 1 )) || die "--window-id, --title-pattern, and --tty are mutually exclusive"
   [[ -x "$SEND_CURRENT_BIN" ]] || die "terminal mode requires sender: $SEND_CURRENT_BIN"
 
-  if [[ -z "$window_id" && -z "$title_pattern" ]]; then
-    "$SEND_CURRENT_BIN" --print-window-id placeholder
+  if [[ -n "$target_tty" ]]; then
+    "$SEND_CURRENT_BIN" --tty "$target_tty" --print-window-id placeholder
+  elif [[ -z "$window_id" && -z "$title_pattern" ]]; then
+    die "terminal loop requires --window-id, --title-pattern, or an interactive Terminal tty"
   fi
 }
 
@@ -841,7 +858,10 @@ run_job_once() {
     elif [[ -n "${TARGET_TITLE_PATTERN:-}" ]]; then
       target_cmd+=(--title-pattern "$TARGET_TITLE_PATTERN")
     fi
-    send_cmd=("${target_cmd[@]}" --wait-for-idle --delay "${SEND_DELAY:-0}" --stdin)
+    if [[ -n "${TARGET_TTY:-}" ]]; then
+      target_cmd+=(--tty "$TARGET_TTY")
+    fi
+    send_cmd=("${target_cmd[@]}" --delay "${SEND_DELAY:-0}" --stdin)
 
     started_at="$(now_iso)"
     LAST_RUN_STARTED_AT="$started_at"
@@ -851,7 +871,7 @@ run_job_once() {
     save_job "$jobdir"
 
     prompt_preview="$(job_prompt_preview "$jobdir")"
-    echo "[$started_at] start mode=terminal interval=$INTERVAL_INPUT target_window=${TARGET_WINDOW_ID:-} target_title=${TARGET_TITLE_PATTERN:-} prompt=$prompt_preview" >>"$jobdir/run.log"
+    echo "[$started_at] start mode=terminal interval=$INTERVAL_INPUT target_window=${TARGET_WINDOW_ID:-} target_title=${TARGET_TITLE_PATTERN:-} target_tty=${TARGET_TTY:-} prompt=$prompt_preview" >>"$jobdir/run.log"
 
     : >"$json_file"
     : >"$last_message_file"
@@ -888,7 +908,7 @@ run_job_once() {
           printf 'terminal wait-for-idle failed rc=%s\n' "$rc" >"$last_message_file"
         fi
       else
-        printf 'sent prompt to terminal target window=%s title=%s\n' "${TARGET_WINDOW_ID:-}" "${TARGET_TITLE_PATTERN:-}" >"$last_message_file"
+        printf 'sent prompt to terminal target window=%s title=%s tty=%s\n' "${TARGET_WINDOW_ID:-}" "${TARGET_TITLE_PATTERN:-}" "${TARGET_TTY:-}" >"$last_message_file"
       fi
     else
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
@@ -959,6 +979,7 @@ create_job() {
   local mode="$DEFAULT_MODE"
   local target_window_id=""
   local target_title_pattern=""
+  local target_tty=""
   local send_delay="0"
 
   while [[ $# -gt 0 ]]; do
@@ -999,6 +1020,12 @@ create_job() {
         target_title_pattern="$2"
         shift 2
         ;;
+      --tty)
+        [[ $# -ge 2 ]] || die "--tty requires a value"
+        mode="terminal"
+        target_tty="$2"
+        shift 2
+        ;;
       --send-delay)
         [[ $# -ge 2 ]] || die "--send-delay requires a value"
         send_delay="$2"
@@ -1019,7 +1046,10 @@ create_job() {
   [[ -d "$cwd" ]] || die "working directory not found: $cwd"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
-  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern")}"
+  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" ]]; then
+    target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, or running codex-loop from the target Terminal Codex session"
+  fi
+  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty")}"
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1064,6 +1094,7 @@ create_job() {
   MODE="$mode"
   TARGET_WINDOW_ID="$target_window_id"
   TARGET_TITLE_PATTERN="$target_title_pattern"
+  TARGET_TTY="$target_tty"
   SEND_DELAY="$send_delay"
   SCHEDULE_MODE="$schedule_mode"
   PROMPT_SOURCE="$prompt_source"
@@ -1083,7 +1114,7 @@ Prompt source: ${PROMPT_SOURCE:-inline}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-}
+Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$jobdir")
 EOF
@@ -1102,6 +1133,7 @@ ensure_job() {
   local mode="$DEFAULT_MODE"
   local target_window_id=""
   local target_title_pattern=""
+  local target_tty=""
   local send_delay="0"
 
   while [[ $# -gt 0 ]]; do
@@ -1142,6 +1174,12 @@ ensure_job() {
         target_title_pattern="$2"
         shift 2
         ;;
+      --tty)
+        [[ $# -ge 2 ]] || die "--tty requires a value"
+        mode="terminal"
+        target_tty="$2"
+        shift 2
+        ;;
       --send-delay)
         [[ $# -ge 2 ]] || die "--send-delay requires a value"
         send_delay="$2"
@@ -1165,7 +1203,10 @@ ensure_job() {
   cwd="$(cd "$cwd" && pwd)"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
-  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern")}"
+  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" ]]; then
+    target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, or running codex-loop from the target Terminal Codex session"
+  fi
+  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty")}"
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1178,7 +1219,7 @@ ensure_job() {
   if selected="$(resolve_jobdir "$job_name" 2>/dev/null)"; then
     load_job "$selected"
     selected_prompt="$(cat "$selected/prompt.txt" 2>/dev/null || true)"
-    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${SEND_DELAY:-0}" != "$send_delay" ]]; then
+    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${SEND_DELAY:-0}" != "$send_delay" ]]; then
       spec_changed=1
     fi
 
@@ -1190,6 +1231,7 @@ ensure_job() {
     MODE="$mode"
     TARGET_WINDOW_ID="$target_window_id"
     TARGET_TITLE_PATTERN="$target_title_pattern"
+    TARGET_TTY="$target_tty"
     SEND_DELAY="$send_delay"
     SCHEDULE_MODE="$schedule_mode"
     PROMPT_SOURCE="$prompt_source"
@@ -1235,7 +1277,7 @@ Prompt source: ${PROMPT_SOURCE:-inline}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-}
+Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$selected")
 EOF
@@ -1246,10 +1288,11 @@ EOF
   if (( start_now )); then
     create_args+=(--start-now)
   fi
-  if [[ -n "$target_window_id" ]]; then
+  if [[ -n "$target_tty" ]]; then
+    create_args+=(--tty "$target_tty")
+  elif [[ -n "$target_window_id" ]]; then
     create_args+=(--window-id "$target_window_id")
-  fi
-  if [[ -n "$target_title_pattern" ]]; then
+  elif [[ -n "$target_title_pattern" ]]; then
     create_args+=(--title-pattern "$target_title_pattern")
   fi
   create_job "${create_args[@]}" -- "$raw_input"
@@ -1304,7 +1347,7 @@ Schedule mode: ${SCHEDULE_MODE:-fixed}
 Prompt source: ${PROMPT_SOURCE:-inline}
 Next run: ${NEXT_RUN_AT:-}
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-}
+Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Send delay: ${SEND_DELAY:-0}
 Session id: ${SESSION_ID:-}
 Worker pid: ${PID:-}

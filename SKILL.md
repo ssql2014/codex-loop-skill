@@ -14,7 +14,8 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
 4. New loop jobs must target the current Terminal Codex session. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
-5. The background worker only schedules and queues Terminal input. The actual reasoning and tool work happen in the current Terminal Codex session.
+5. Target binding must be reliable. Prefer creating the loop from inside the target Codex Terminal session so `codex-loop` can bind that Terminal tab's TTY. If creating from another session, pass `--tty /dev/ttysNNN`, `--window-id ID`, or `--title-pattern TEXT`; do not rely on front-window guessing.
+6. The background worker only schedules and queues Terminal input. The actual reasoning and tool work happen in the current Terminal Codex session.
 
 ## Commands
 
@@ -24,7 +25,7 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
   `codex-loop ensure --name JOB_NAME --cwd "$PWD" -- "<raw loop input>"`
 - Create or ensure a loop that sends the prompt back into a Terminal Codex session:
   `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
-  Use `--title-pattern TEXT` instead of `--window-id` when the Terminal title is stable.
+  Use `--tty /dev/ttysNNN` for the most reliable Terminal tab binding, or `--title-pattern TEXT` when the Terminal title is stable.
 - List loops:
   `codex-loop list`
 - Show details for one loop:
@@ -57,7 +58,7 @@ Mirror Claude's `/loop` surface syntax:
 
 Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
-`asap` mode queues the next iteration immediately after the previous iteration finishes. In `terminal` mode this means: wait for the target Codex session to be idle, send the prompt, wait for it to return to idle, then immediately schedule the next prompt with no extra sleep.
+`asap` mode queues the next iteration immediately after the previous iteration finishes. In `terminal` mode this means: send the prompt to the bound Terminal tab, then wait for that same tab to return to idle before scheduling the next prompt with no extra sleep.
 
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
@@ -65,14 +66,14 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 ## Behavior
 
-- Default `terminal` mode: each loop fire waits until the target Terminal Codex session appears idle, pastes the parsed prompt, and presses Return via `codex-send-current.sh`. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
+- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound Terminal tab and presses Return via `codex-send-current.sh`. The binding is TTY/window/title based and must be captured at creation time. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
-  - `asap`: explicit `asap` input such as `asap keep going`; the next run is queued immediately after the previous run finishes and the target session is idle.
+  - `asap`: explicit `asap` input such as `asap keep going`; the next run is queued immediately after the bound target tab returns to idle.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
-- This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses a best-effort idle detector based on Terminal contents.
+- This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
 - Detached `exec` mode is disabled. Historical jobs with `MODE=exec` are blocked at runtime instead of launching detached Codex.
 - No overlap per job. A loop never spawns multiple concurrent Codex runs for the same job.
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
