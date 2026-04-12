@@ -78,9 +78,9 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
 - Detached `exec` mode is disabled. Historical jobs with `MODE=exec` are blocked at runtime instead of launching detached Codex.
 - No overlap per job. A loop never spawns multiple concurrent Codex runs for the same job.
-- Reflection is on by default. Each fired prompt asks Codex to include compact `LOOP_REFLECTION_*` lines about the loop target, the loop/prompt/skill itself, a prompt/skill adjustment to consider, and the next smallest action. Terminal loops read back output to capture reflections; captured reflections are appended to `reflection.log`.
+- Reflection is on by default. Each fired prompt asks Codex to include compact `LOOP_REFLECTION_*` lines about the loop target, the target project, active skills, prompts, workflow docs, repo instructions, and the next smallest action. Terminal loops read back output to capture reflections; captured reflections are appended to `reflection.log`.
 - `state.md` is regenerated from the latest reflection and a short `reflection.log` tail using Hermes-style sections: Goal, Constraints & Preferences, Progress, Key Decisions, Relevant Files, Next Steps, and Critical Context.
-- Reflection may improve the loop skill or loop prompt when it finds a concrete defect or high-confidence improvement. Keep self-improvement edits narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
+- Reflection may improve relevant user/project skills, prompts, workflow docs, repo instructions, or the loop itself when it finds a concrete defect or high-confidence improvement. Keep self-improvement edits scope-relevant and narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
   `prompt.txt`, `runtime_prompt.txt`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`

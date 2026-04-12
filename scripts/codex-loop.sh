@@ -378,10 +378,10 @@ EOF
 Codex-loop reflection instruction:
 At the end of your final response, include this compact reflection section:
 LOOP_REFLECTION_TARGET=<what changed about the loop target or its state>
-LOOP_REFLECTION_SELF=<one improvement or risk for this loop, prompt, or skill; write none if none>
-LOOP_REFLECTION_PROMPT=<one concrete prompt/skill adjustment to consider; write none if none>
+LOOP_REFLECTION_SELF=<one improvement or risk for this loop, target project, active skills, prompts, workflow docs, or repo instructions; write none if none>
+LOOP_REFLECTION_PROMPT=<one concrete adjustment to a relevant prompt, skill, workflow doc, repo instruction, or this loop; write none if none>
 LOOP_REFLECTION_NEXT=<the smallest useful next action or verification>
-Self-improvement edits to the loop skill or loop prompt are allowed when the reflection identifies a concrete defect or high-confidence improvement. Keep edits narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
+Self-improvement edits are allowed when the reflection identifies a concrete defect or high-confidence improvement in any relevant user/project skill, prompt, workflow doc, repo instruction, or this loop. Keep edits narrow and scope-relevant, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 EOF
   fi
 }
@@ -429,7 +429,7 @@ $(job_prompt_preview "$jobdir")
 - Working directory: ${CWD:-}
 - Schedule: ${SCHEDULE_MODE:-fixed} / ${INTERVAL_INPUT:-}
 - Mode: ${MODE:-terminal}
-- Reflection may improve the loop skill or prompt only through narrow, verified, committed edits.
+- Reflection may improve relevant skills, prompts, workflow docs, repo instructions, or this loop only through narrow, verified, committed edits.
 
 ## Progress
 ### Latest Target State
