@@ -60,7 +60,7 @@ Mirror Claude's `/loop` surface syntax:
 
 Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
-`asap` mode aggressively queues the next iteration as soon as the prior send is accepted. In `terminal` mode it does not wait for the bound Terminal tab to become idle; it sends the prompt, waits briefly, then probes for a busy/working state before scheduling the next ASAP fire after a short queue throttle. Busy detection is advisory by default because Terminal content heuristics can be unreliable while prompts are queued; set `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1` to restore fail-closed behavior. The default queue throttle is 30 seconds and can be overridden with `CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY`.
+`asap` mode aggressively queues the next iteration as soon as the prior send is accepted. In `terminal` mode it does not wait for the bound Terminal tab to become idle; it sends the prompt, waits briefly, then probes for a busy/working state before scheduling the next ASAP fire immediately. Busy detection is advisory by default because Terminal content heuristics can be unreliable while prompts are queued; set `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1` to restore fail-closed behavior. A sender-side queue cooldown may be applied between sends to avoid flooding, but it must not change the job's `asap` schedule metadata. The default cooldown is 30 seconds and can be overridden with `CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY`.
 
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
@@ -72,7 +72,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
-  - `asap`: explicit `asap` input such as `asap keep going`; the next run is queued after the bound target tab accepts Return, plus a small queue throttle. It intentionally does not wait for idle before sending the next prompt. Busy/turn-start detection is advisory by default and can be made fail-closed with `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1`.
+  - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately after the bound target tab accepts Return. It intentionally does not wait for idle before sending the next prompt. Busy/turn-start detection is advisory by default and can be made fail-closed with `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1`. A sender-side queue cooldown may delay the worker internally without changing the job to a fixed interval schedule.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.

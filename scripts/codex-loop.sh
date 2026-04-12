@@ -581,11 +581,11 @@ schedule_next_run() {
   local note=""
 
   if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
-    seconds="$TERMINAL_ASAP_QUEUE_DELAY"
-    note="asap schedule; next run after queue throttle ${TERMINAL_ASAP_QUEUE_DELAY}s"
+    seconds=0
+    note="asap schedule; next run immediately"
     INTERVAL_INPUT="asap"
-    INTERVAL_SECONDS="$TERMINAL_ASAP_QUEUE_DELAY"
-    INTERVAL_LABEL="$(format_schedule_label asap "$TERMINAL_ASAP_QUEUE_DELAY")"
+    INTERVAL_SECONDS="0"
+    INTERVAL_LABEL="$(format_schedule_label asap 0)"
   elif [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" ]]; then
     local delay_spec delay_seconds reason
     delay_spec="$(extract_dynamic_delay "$jobdir/last_message.txt" || true)"
@@ -1092,6 +1092,11 @@ run_job_once() {
       fi
     else
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
+    fi
+
+    if [[ "$rc" -eq 0 && "${SCHEDULE_MODE:-fixed}" == "asap" && "$TERMINAL_ASAP_QUEUE_DELAY" != "0" ]]; then
+      sleep "$TERMINAL_ASAP_QUEUE_DELAY"
+      LAST_RUN_FINISHED_AT="$(now_iso)"
     fi
 
     record_loop_reflection "$jobdir"
