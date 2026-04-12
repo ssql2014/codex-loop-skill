@@ -11,6 +11,7 @@ DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
 TERMINAL_ASAP_QUEUE_DELAY="${CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY:-30}"
+TERMINAL_ASAP_REQUIRE_BUSY="${CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY:-0}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
@@ -1069,6 +1070,11 @@ run_job_once() {
         LAST_RUN_FINISHED_AT="$(now_iso)"
         if [[ "$rc" -ne 0 ]]; then
           printf 'terminal wait-for-busy failed rc=%s\n' "$rc" >"$last_message_file"
+          if [[ "$TERMINAL_ASAP_REQUIRE_BUSY" == "0" ]]; then
+            printf 'terminal wait-for-busy failed rc=%s; continuing because ASAP busy detection is advisory\n' "$rc" >"$last_message_file"
+            rc=0
+            LAST_EXIT_CODE="$rc"
+          fi
         fi
       elif (( capture_terminal_output )); then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
