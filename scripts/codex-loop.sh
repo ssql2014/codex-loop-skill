@@ -404,6 +404,77 @@ extract_keyed_line() {
   ' "$file"
 }
 
+update_loop_state() {
+  local jobdir="$1"
+  local target="$2"
+  local self="$3"
+  local prompt="$4"
+  local next="$5"
+  local tmp="$jobdir/state.md.tmp.$$.$RANDOM"
+  local recent=""
+
+  recent="$(tail -n 80 "$jobdir/reflection.log" 2>/dev/null || true)"
+
+  {
+    cat <<EOF
+# Codex Loop State
+
+Generated: $(now_iso)
+
+## Goal
+$(job_prompt_preview "$jobdir")
+
+## Constraints & Preferences
+- Job: ${JOB_ID:-}${JOB_NAME:+ (${JOB_NAME})}
+- Working directory: ${CWD:-}
+- Schedule: ${SCHEDULE_MODE:-fixed} / ${INTERVAL_INPUT:-}
+- Mode: ${MODE:-terminal}
+- Reflection may improve the loop skill or prompt only through narrow, verified, committed edits.
+
+## Progress
+### Latest Target State
+${target:-none}
+
+### Loop/Prompt Reflection
+${self:-none}
+
+### Prompt Adjustment Candidate
+${prompt:-none}
+
+## Key Decisions
+- Runtime prompts include compact LOOP_REFLECTION_* lines.
+- This state file is regenerated from the latest reflection plus a short reflection log tail.
+
+## Relevant Files
+- prompt.txt
+- runtime_prompt.txt
+- reflection.log
+- state.md
+- last_message.txt
+- run.log
+
+## Next Steps
+${next:-none}
+
+## Critical Context
+- Run count: $(run_count_label)
+- Last started: ${LAST_RUN_STARTED_AT:-}
+- Last finished: ${LAST_RUN_FINISHED_AT:-}
+- Last exit code: ${LAST_EXIT_CODE:-}
+- Last note: ${LAST_NOTE:-}
+
+## Recent Reflections
+EOF
+    if [[ -n "$recent" ]]; then
+      printf '%s\n' "$recent"
+    else
+      printf 'none\n'
+    fi
+  } >"$tmp"
+
+  mv "$tmp" "$jobdir/state.md"
+}
+
 record_loop_reflection() {
   local jobdir="$1"
   local message_file="$jobdir/last_message.txt"
@@ -421,6 +492,8 @@ record_loop_reflection() {
     printf 'prompt=%s\n' "$prompt"
     printf 'next=%s\n\n' "$next"
   } >>"$jobdir/reflection.log"
+
+  update_loop_state "$jobdir" "$target" "$self" "$prompt" "$next"
 }
 
 parse_duration_to_seconds() {
@@ -921,6 +994,7 @@ run_job_once() {
   if [[ "$mode" == "terminal" ]]; then
     local -a target_cmd=("$SEND_CURRENT_BIN" --idle-timeout "$TERMINAL_IDLE_TIMEOUT")
     local -a send_cmd=()
+    local capture_terminal_output=0
 
     [[ -x "$SEND_CURRENT_BIN" ]] || die "terminal mode requires sender: $SEND_CURRENT_BIN"
 
@@ -935,6 +1009,9 @@ run_job_once() {
     send_cmd=("${target_cmd[@]}" --delay "${SEND_DELAY:-0}" --stdin)
     if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
       send_cmd+=(--wait-for-idle)
+      capture_terminal_output=1
+    elif [[ "$REFLECTION_ENABLED" != "0" ]]; then
+      capture_terminal_output=1
     fi
 
     started_at="$(now_iso)"
@@ -970,7 +1047,7 @@ run_job_once() {
     LAST_EXIT_CODE="$rc"
 
     if [[ "$rc" -eq 0 ]]; then
-      if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
+      if (( capture_terminal_output )); then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
         "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
@@ -1165,6 +1242,7 @@ create_job() {
   : >"$jobdir/last_run.jsonl"
   : >"$jobdir/runtime_prompt.txt"
   : >"$jobdir/reflection.log"
+  : >"$jobdir/state.md"
   : >"$jobdir/worker.log"
 
   JOB_ID="$job_id"
@@ -1365,6 +1443,7 @@ ensure_job() {
       : >"$selected/last_run.jsonl"
       : >"$selected/runtime_prompt.txt"
       : >"$selected/reflection.log"
+      : >"$selected/state.md"
       LAST_NOTE="spec updated; session reset"
     elif [[ -n "$note" ]]; then
       LAST_NOTE="$note"
@@ -1476,6 +1555,7 @@ Artifacts:
   $jobdir/prompt.txt
   $jobdir/runtime_prompt.txt
   $jobdir/reflection.log
+  $jobdir/state.md
   $jobdir/run.log
   $jobdir/stderr.log
   $jobdir/last_message.txt
