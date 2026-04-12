@@ -23,6 +23,8 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
   `codex-loop --cwd "$PWD" -- "<raw loop input>"`
 - Ensure one named loop exists and stays reusable:
   `codex-loop ensure --name JOB_NAME --cwd "$PWD" -- "<raw loop input>"`
+- Limit a loop to N runs:
+  `codex-loop --count 5 -- "asap continue"`
 - Create or ensure a loop that sends the prompt back into a Terminal Codex session:
   `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
   Use `--tty /dev/ttysNNN` for the most reliable Terminal tab binding, or `--title-pattern TEXT` when the Terminal title is stable.
@@ -79,6 +81,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
   `prompt.txt`, `runtime_prompt.txt`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
+- The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`; `loop` no longer depends on the separate `auto-continue` skill.
 
 ## Response Pattern
 

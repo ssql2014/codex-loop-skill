@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="${CODEX_LOOP_HOME:-$HOME/codex-loop}"
 JOBS_DIR="$BASE_DIR/jobs"
-SEND_CURRENT_BIN_DEFAULT="$HOME/Documents/Projects/codex-auto-continue-skill/scripts/codex-send-current.sh"
+SEND_CURRENT_BIN_DEFAULT="$SCRIPT_DIR/codex-send-current.sh"
 SEND_CURRENT_BIN="${CODEX_LOOP_SEND_CURRENT_BIN:-$SEND_CURRENT_BIN_DEFAULT}"
 DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
@@ -19,13 +20,13 @@ DYNAMIC_MAX_SECONDS=3600
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -38,6 +39,7 @@ Examples:
   codex-loop "check pane 35 every 10 minutes"
   codex-loop "check whether CI passed and address review comments"
   codex-loop "asap keep improving this issue until blocked"
+  codex-loop --count 5 -- "asap continue"
   codex-loop "15m"
   codex-loop
   codex-loop ensure --name deploy-watch --cwd "$PWD" -- "5m check the deploy"
@@ -173,6 +175,7 @@ load_job() {
   SEND_DELAY="0"
   SCHEDULE_MODE="fixed"
   PROMPT_SOURCE="inline"
+  MAX_RUNS="0"
   # shellcheck disable=SC1090
   source "$jobdir/meta.env"
   MODE="${MODE:-terminal}"
@@ -182,6 +185,7 @@ load_job() {
   SEND_DELAY="${SEND_DELAY:-0}"
   SCHEDULE_MODE="${SCHEDULE_MODE:-fixed}"
   PROMPT_SOURCE="${PROMPT_SOURCE:-inline}"
+  MAX_RUNS="${MAX_RUNS:-0}"
 }
 
 save_job() {
@@ -212,6 +216,7 @@ TARGET_TTY='$(escape_squotes "${TARGET_TTY:-}")'
 SEND_DELAY='$(escape_squotes "${SEND_DELAY:-0}")'
 SCHEDULE_MODE='$(escape_squotes "${SCHEDULE_MODE:-fixed}")'
 PROMPT_SOURCE='$(escape_squotes "${PROMPT_SOURCE:-inline}")'
+MAX_RUNS='$(escape_squotes "${MAX_RUNS:-0}")'
 LAST_NOTE='$(escape_squotes "${LAST_NOTE:-}")'
 UPDATED_AT='$(escape_squotes "$(now_iso)")'
 EOF
@@ -239,6 +244,12 @@ validate_non_negative_number() {
   local value="$1"
   local label="$2"
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$label must be a non-negative number: $value"
+}
+
+validate_positive_integer() {
+  local value="$1"
+  local label="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$label must be a positive integer: $value"
 }
 
 current_tty() {
@@ -714,6 +725,14 @@ last_message_preview() {
   fi
 }
 
+run_count_label() {
+  if [[ "${MAX_RUNS:-0}" != "0" ]]; then
+    printf '%s/%s' "${RUN_COUNT:-0}" "${MAX_RUNS:-0}"
+  else
+    printf '%s' "${RUN_COUNT:-0}"
+  fi
+}
+
 job_display_status() {
   local jobdir="$1"
   load_job "$jobdir"
@@ -918,7 +937,13 @@ run_job_once() {
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
     fi
 
-    if [[ "${STATUS:-active}" == "active" && "$rc" -ne 0 && ( "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ) ]]; then
+    if [[ "${STATUS:-active}" == "active" && "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
+      STATUS="completed"
+      NEXT_RUN_EPOCH="0"
+      NEXT_RUN_AT=""
+      LAST_NOTE="completed after $(run_count_label) runs"
+      save_job "$jobdir"
+    elif [[ "${STATUS:-active}" == "active" && "$rc" -ne 0 && ( "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ) ]]; then
       STATUS="paused"
       NEXT_RUN_EPOCH="0"
       NEXT_RUN_AT=""
@@ -991,6 +1016,7 @@ create_job() {
   local target_title_pattern=""
   local target_tty=""
   local send_delay="0"
+  local max_runs="0"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1007,6 +1033,12 @@ create_job() {
       --start-now)
         start_now=1
         shift
+        ;;
+      --count|--max-runs)
+        [[ $# -ge 2 ]] || die "$1 requires a value"
+        validate_positive_integer "$2" "$1"
+        max_runs="$2"
+        shift 2
         ;;
       --mode)
         [[ $# -ge 2 ]] || die "--mode requires a value"
@@ -1096,6 +1128,7 @@ create_job() {
   NEXT_RUN_AT="$(epoch_to_local "$NEXT_RUN_EPOCH")"
   SESSION_ID=""
   RUN_COUNT="0"
+  MAX_RUNS="$max_runs"
   LAST_RUN_STARTED_AT=""
   LAST_RUN_FINISHED_AT=""
   LAST_EXIT_CODE=""
@@ -1121,6 +1154,7 @@ Status: $(job_display_status "$jobdir")
 Interval: $INTERVAL_LABEL ($INTERVAL_INPUT)
 Schedule mode: ${SCHEDULE_MODE:-fixed}
 Prompt source: ${PROMPT_SOURCE:-inline}
+Run limit: ${MAX_RUNS:-0}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
@@ -1145,6 +1179,7 @@ ensure_job() {
   local target_title_pattern=""
   local target_tty=""
   local send_delay="0"
+  local max_runs="0"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1161,6 +1196,12 @@ ensure_job() {
       --start-now)
         start_now=1
         shift
+        ;;
+      --count|--max-runs)
+        [[ $# -ge 2 ]] || die "$1 requires a value"
+        validate_positive_integer "$2" "$1"
+        max_runs="$2"
+        shift 2
         ;;
       --mode)
         [[ $# -ge 2 ]] || die "--mode requires a value"
@@ -1229,7 +1270,7 @@ ensure_job() {
   if selected="$(resolve_jobdir "$job_name" 2>/dev/null)"; then
     load_job "$selected"
     selected_prompt="$(cat "$selected/prompt.txt" 2>/dev/null || true)"
-    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${SEND_DELAY:-0}" != "$send_delay" ]]; then
+    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${SEND_DELAY:-0}" != "$send_delay" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
       spec_changed=1
     fi
 
@@ -1243,6 +1284,7 @@ ensure_job() {
     TARGET_TITLE_PATTERN="$target_title_pattern"
     TARGET_TTY="$target_tty"
     SEND_DELAY="$send_delay"
+    MAX_RUNS="$max_runs"
     SCHEDULE_MODE="$schedule_mode"
     PROMPT_SOURCE="$prompt_source"
     STATUS="active"
@@ -1284,6 +1326,7 @@ Status: $(job_display_status "$selected")
 Interval: $INTERVAL_LABEL ($INTERVAL_INPUT)
 Schedule mode: ${SCHEDULE_MODE:-fixed}
 Prompt source: ${PROMPT_SOURCE:-inline}
+Run limit: ${MAX_RUNS:-0}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
@@ -1297,6 +1340,9 @@ EOF
   local -a create_args=(--name "$job_name" --cwd "$cwd" --mode "$mode" --send-delay "$send_delay")
   if (( start_now )); then
     create_args+=(--start-now)
+  fi
+  if [[ "$max_runs" != "0" ]]; then
+    create_args+=(--count "$max_runs")
   fi
   if [[ -n "$target_tty" ]]; then
     create_args+=(--tty "$target_tty")
@@ -1336,7 +1382,7 @@ list_jobs() {
       "${SCHEDULE_MODE:-fixed}" \
       "$INTERVAL_INPUT" \
       "${NEXT_RUN_AT:-n/a}" \
-      "$RUN_COUNT" \
+      "$(run_count_label)" \
       "$prompt_preview"
   done
 }
@@ -1355,6 +1401,7 @@ Working directory: ${CWD:-}
 Interval: ${INTERVAL_LABEL:-} (${INTERVAL_INPUT:-})
 Schedule mode: ${SCHEDULE_MODE:-fixed}
 Prompt source: ${PROMPT_SOURCE:-inline}
+Run limit: ${MAX_RUNS:-0}
 Next run: ${NEXT_RUN_AT:-}
 Mode: ${MODE:-terminal}
 Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
@@ -1362,7 +1409,7 @@ Send delay: ${SEND_DELAY:-0}
 Session id: ${SESSION_ID:-}
 Worker pid: ${PID:-}
 Child pid: ${CURRENT_CHILD_PID:-}
-Run count: ${RUN_COUNT:-0}
+Run count: $(run_count_label)
 Last started: ${LAST_RUN_STARTED_AT:-}
 Last finished: ${LAST_RUN_FINISHED_AT:-}
 Last exit code: ${LAST_EXIT_CODE:-}
@@ -1412,6 +1459,9 @@ restart_job() {
   load_job "$jobdir"
 
   STATUS="active"
+  if [[ "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
+    RUN_COUNT="0"
+  fi
   if [[ -z "${NEXT_RUN_EPOCH:-}" || "$NEXT_RUN_EPOCH" == "0" ]]; then
     NEXT_RUN_EPOCH=$(( $(now_epoch) + INTERVAL_SECONDS ))
     NEXT_RUN_AT="$(epoch_to_local "$NEXT_RUN_EPOCH")"
@@ -1430,6 +1480,9 @@ run_now_job() {
 
   if [[ "${STATUS:-}" != "active" ]]; then
     STATUS="active"
+    if [[ "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
+      RUN_COUNT="0"
+    fi
     save_job "$jobdir"
   fi
 
