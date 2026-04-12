@@ -58,7 +58,7 @@ Mirror Claude's `/loop` surface syntax:
 
 Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
-`asap` mode queues the next iteration immediately after the previous iteration finishes. In `terminal` mode this means: send the prompt to the bound Terminal tab, then wait for that same tab to return to idle before scheduling the next prompt with no extra sleep.
+`asap` mode queues the next iteration immediately after the previous iteration finishes. In `terminal` mode this is conservative: wait for the bound Terminal tab to be idle before sending, send the prompt, then require one observed busy/working turn before accepting the next idle state. If no turn-start is observed, pause the job rather than risk pasting multiple prompts into the same input field.
 
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
@@ -70,7 +70,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
-  - `asap`: explicit `asap` input such as `asap keep going`; the next run is queued immediately after the bound target tab returns to idle.
+  - `asap`: explicit `asap` input such as `asap keep going`; the next run is queued after the bound target tab has run one turn and returned to idle. A failed turn-start observation pauses the job as a safety stop.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.

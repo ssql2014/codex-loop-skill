@@ -9,6 +9,7 @@ SEND_CURRENT_BIN="${CODEX_LOOP_SEND_CURRENT_BIN:-$SEND_CURRENT_BIN_DEFAULT}"
 DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
+TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
 DYNAMIC_INITIAL_SECONDS=600
@@ -862,6 +863,9 @@ run_job_once() {
       target_cmd+=(--tty "$TARGET_TTY")
     fi
     send_cmd=("${target_cmd[@]}" --delay "${SEND_DELAY:-0}" --stdin)
+    if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
+      send_cmd+=(--wait-for-idle)
+    fi
 
     started_at="$(now_iso)"
     LAST_RUN_STARTED_AT="$started_at"
@@ -899,7 +903,7 @@ run_job_once() {
       if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
-        "${target_cmd[@]}" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+        "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
         rc="$?"
         set -e
         LAST_EXIT_CODE="$rc"
@@ -914,7 +918,13 @@ run_job_once() {
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
     fi
 
-    if [[ "${STATUS:-active}" == "active" ]]; then
+    if [[ "${STATUS:-active}" == "active" && "$rc" -ne 0 && ( "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ) ]]; then
+      STATUS="paused"
+      NEXT_RUN_EPOCH="0"
+      NEXT_RUN_AT=""
+      LAST_NOTE="paused after terminal send because Codex turn start/finish was not observed; prevents prompt concatenation"
+      save_job "$jobdir"
+    elif [[ "${STATUS:-active}" == "active" ]]; then
       schedule_next_run "$jobdir" "$rc" "terminal loop exited with status $rc"
     elif [[ -z "${LAST_NOTE:-}" && "$rc" -ne 0 ]]; then
       LAST_NOTE="terminal loop exited with status $rc"
