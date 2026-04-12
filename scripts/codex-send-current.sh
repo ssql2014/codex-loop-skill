@@ -5,6 +5,7 @@ set -euo pipefail
 WINDOW_ID=""
 TITLE_PATTERN=""
 TARGET_TTY=""
+TARGET_TMUX_PANE=""
 TEXT=""
 PRESS_ENTER=1
 DELAY_SEC="0"
@@ -30,6 +31,7 @@ Options:
   --window-id ID   Target Terminal window id. Default: current front window.
   --title-pattern T Resolve the target Terminal window by matching its title.
   --tty TTY        Resolve and target the Terminal tab with this tty, e.g. /dev/ttys020.
+  --tmux-pane PANE Target a tmux pane directly, e.g. %18. Preferred when the Codex session runs inside tmux.
   --delay SEC      Wait this many seconds before sending. Default: 0
   --background     Spawn a delayed one-shot sender and return immediately.
   --dry-run        Print the resolved action without sending anything.
@@ -122,6 +124,10 @@ resolve_window_id() {
 terminal_content() {
   local wid="$1"
   local target_tty="${2:-}"
+  if [[ -n "$TARGET_TMUX_PANE" ]]; then
+    tmux capture-pane -p -J -S -400 -t "$TARGET_TMUX_PANE"
+    return 0
+  fi
   osascript - "$wid" "$target_tty" <<'APPLESCRIPT'
 on run argv
   set wid to (item 1 of argv) as integer
@@ -244,6 +250,20 @@ validate_non_negative_number() {
   fi
 }
 
+send_tmux_payload() {
+  local pane="$1"
+  local payload="$2"
+  local press_enter="$3"
+  local buffer_name="codex-loop-send-$$-$RANDOM"
+
+  tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null
+  printf '%s' "$payload" | tmux load-buffer -b "$buffer_name" -
+  tmux paste-buffer -p -d -b "$buffer_name" -t "$pane"
+  if [[ "$press_enter" -eq 1 ]]; then
+    tmux send-keys -t "$pane" Enter
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --window-id)
@@ -256,6 +276,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tty)
       TARGET_TTY="${2:-}"
+      shift 2
+      ;;
+    --tmux-pane)
+      TARGET_TMUX_PANE="${2:-}"
       shift 2
       ;;
     --delay)
@@ -333,6 +357,11 @@ done
 validate_non_negative_number "$DELAY_SEC" "delay"
 validate_non_negative_number "$IDLE_TIMEOUT_SEC" "idle-timeout"
 
+if [[ -n "$TARGET_TMUX_PANE" && ( -n "$WINDOW_ID" || -n "$TITLE_PATTERN" || -n "$TARGET_TTY" ) ]]; then
+  echo "--tmux-pane is mutually exclusive with --window-id, --title-pattern, and --tty" >&2
+  exit 1
+fi
+
 if [[ "$WAIT_IDLE_ONLY" -eq 1 || "$WAIT_BUSY_ONLY" -eq 1 ]]; then
   TEXT=""
 elif [[ "$READ_STDIN" -eq 1 ]]; then
@@ -345,14 +374,23 @@ else
   TEXT="$*"
 fi
 
-WINDOW_ID="$(resolve_window_id)"
+if [[ -n "$TARGET_TMUX_PANE" ]]; then
+  tmux display-message -p -t "$TARGET_TMUX_PANE" '#{pane_id}' >/dev/null
+  WINDOW_ID="tmux:$TARGET_TMUX_PANE"
+else
+  WINDOW_ID="$(resolve_window_id)"
+fi
 if [[ "$PRINT_WINDOW_ID" -eq 1 ]]; then
   printf '%s\n' "$WINDOW_ID"
   exit 0
 fi
 
 if [[ "$BACKGROUND" -eq 1 ]]; then
-  cmd=( "$0" --window-id "$WINDOW_ID" --delay "$DELAY_SEC" )
+  if [[ -n "$TARGET_TMUX_PANE" ]]; then
+    cmd=( "$0" --tmux-pane "$TARGET_TMUX_PANE" --delay "$DELAY_SEC" )
+  else
+    cmd=( "$0" --window-id "$WINDOW_ID" --delay "$DELAY_SEC" )
+  fi
   if [[ -n "$TARGET_TTY" ]]; then
     cmd+=( --tty "$TARGET_TTY" )
   fi
@@ -414,7 +452,13 @@ fi
 sleep "$DELAY_SEC"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  printf 'dry-run window_id=%s delay=%s enter=%s text=%s\n' "$WINDOW_ID" "$DELAY_SEC" "$PRESS_ENTER" "$TEXT"
+  printf 'dry-run window_id=%s tmux_pane=%s delay=%s enter=%s text=%s\n' "$WINDOW_ID" "$TARGET_TMUX_PANE" "$DELAY_SEC" "$PRESS_ENTER" "$TEXT"
+  exit 0
+fi
+
+if [[ -n "$TARGET_TMUX_PANE" ]]; then
+  send_tmux_payload "$TARGET_TMUX_PANE" "$TEXT" "$PRESS_ENTER"
+  log "sent tmux_pane=$TARGET_TMUX_PANE delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
   exit 0
 fi
 

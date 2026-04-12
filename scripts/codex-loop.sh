@@ -10,9 +10,7 @@ SEND_CURRENT_BIN="${CODEX_LOOP_SEND_CURRENT_BIN:-$SEND_CURRENT_BIN_DEFAULT}"
 DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
-TERMINAL_ASAP_QUEUE_DELAY="${CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY:-30}"
-TERMINAL_ASAP_REQUIRE_BUSY="${CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY:-0}"
-TERMINAL_ASAP_BUSY_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_BUSY_TIMEOUT:-3}"
+TERMINAL_ASAP_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT:-0}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
@@ -24,13 +22,13 @@ REFLECTION_ENABLED="${CODEX_LOOP_REFLECTION:-1}"
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -186,6 +184,7 @@ load_job() {
   TARGET_WINDOW_ID="${TARGET_WINDOW_ID:-}"
   TARGET_TITLE_PATTERN="${TARGET_TITLE_PATTERN:-}"
   TARGET_TTY="${TARGET_TTY:-}"
+  TARGET_TMUX_PANE="${TARGET_TMUX_PANE:-}"
   SEND_DELAY="${SEND_DELAY:-0}"
   SCHEDULE_MODE="${SCHEDULE_MODE:-fixed}"
   PROMPT_SOURCE="${PROMPT_SOURCE:-inline}"
@@ -217,6 +216,7 @@ MODE='$(escape_squotes "${MODE:-terminal}")'
 TARGET_WINDOW_ID='$(escape_squotes "${TARGET_WINDOW_ID:-}")'
 TARGET_TITLE_PATTERN='$(escape_squotes "${TARGET_TITLE_PATTERN:-}")'
 TARGET_TTY='$(escape_squotes "${TARGET_TTY:-}")'
+TARGET_TMUX_PANE='$(escape_squotes "${TARGET_TMUX_PANE:-}")'
 SEND_DELAY='$(escape_squotes "${SEND_DELAY:-0}")'
 SCHEDULE_MODE='$(escape_squotes "${SCHEDULE_MODE:-fixed}")'
 PROMPT_SOURCE='$(escape_squotes "${PROMPT_SOURCE:-inline}")'
@@ -263,21 +263,31 @@ current_tty() {
   printf '%s' "$tty_value"
 }
 
+current_tmux_pane() {
+  local pane="${TMUX_PANE:-}"
+  [[ -n "$pane" ]] || return 1
+  tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || return 1
+}
+
 resolve_terminal_target() {
   local mode="$1"
   local window_id="$2"
   local title_pattern="$3"
   local target_tty="$4"
+  local target_tmux_pane="$5"
 
   [[ "$mode" == "terminal" ]] || return 0
   local target_count=0
   [[ -z "$window_id" ]] || target_count=$((target_count + 1))
   [[ -z "$title_pattern" ]] || target_count=$((target_count + 1))
   [[ -z "$target_tty" ]] || target_count=$((target_count + 1))
-  (( target_count <= 1 )) || die "--window-id, --title-pattern, and --tty are mutually exclusive"
+  [[ -z "$target_tmux_pane" ]] || target_count=$((target_count + 1))
+  (( target_count <= 1 )) || die "--window-id, --title-pattern, --tty, and --tmux-pane are mutually exclusive"
   [[ -x "$SEND_CURRENT_BIN" ]] || die "terminal mode requires sender: $SEND_CURRENT_BIN"
 
-  if [[ -n "$target_tty" ]]; then
+  if [[ -n "$target_tmux_pane" ]]; then
+    tmux display-message -p -t "$target_tmux_pane" '#{pane_id}' >/dev/null || die "tmux pane not found: $target_tmux_pane"
+  elif [[ -n "$target_tty" ]]; then
     "$SEND_CURRENT_BIN" --tty "$target_tty" --print-window-id placeholder
   elif [[ -z "$window_id" && -z "$title_pattern" ]]; then
     die "terminal loop requires --window-id, --title-pattern, or an interactive Terminal tty"
@@ -1008,7 +1018,9 @@ run_job_once() {
 
     [[ -x "$SEND_CURRENT_BIN" ]] || die "terminal mode requires sender: $SEND_CURRENT_BIN"
 
-    if [[ -n "${TARGET_WINDOW_ID:-}" ]]; then
+    if [[ -n "${TARGET_TMUX_PANE:-}" ]]; then
+      target_cmd+=(--tmux-pane "$TARGET_TMUX_PANE")
+    elif [[ -n "${TARGET_WINDOW_ID:-}" ]]; then
       target_cmd+=(--window-id "$TARGET_WINDOW_ID")
     elif [[ -n "${TARGET_TITLE_PATTERN:-}" ]]; then
       target_cmd+=(--title-pattern "$TARGET_TITLE_PATTERN")
@@ -1021,8 +1033,9 @@ run_job_once() {
       send_cmd+=(--wait-for-idle)
       capture_terminal_output=1
     elif [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
-      # ASAP intentionally queues prompts behind the active Codex turn. It only
-      # verifies that the target entered a busy state after Return was sent.
+      # ASAP means "send as soon as the current Codex turn is idle", not
+      # "append to whatever is currently being typed or processed".
+      send_cmd+=(--wait-for-idle)
       capture_terminal_output=1
     elif [[ "$REFLECTION_ENABLED" != "0" ]]; then
       capture_terminal_output=1
@@ -1036,7 +1049,7 @@ run_job_once() {
     save_job "$jobdir"
 
     prompt_preview="$(job_prompt_preview "$jobdir")"
-    echo "[$started_at] start mode=terminal interval=$INTERVAL_INPUT target_window=${TARGET_WINDOW_ID:-} target_title=${TARGET_TITLE_PATTERN:-} target_tty=${TARGET_TTY:-} prompt=$prompt_preview" >>"$jobdir/run.log"
+    echo "[$started_at] start mode=terminal interval=$INTERVAL_INPUT target_tmux_pane=${TARGET_TMUX_PANE:-} target_window=${TARGET_WINDOW_ID:-} target_title=${TARGET_TITLE_PATTERN:-} target_tty=${TARGET_TTY:-} prompt=$prompt_preview" >>"$jobdir/run.log"
 
     : >"$json_file"
     : >"$last_message_file"
@@ -1064,18 +1077,13 @@ run_job_once() {
       if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
-        "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_BUSY_TIMEOUT" --wait-busy-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+        "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
         rc="$?"
         set -e
         LAST_EXIT_CODE="$rc"
         LAST_RUN_FINISHED_AT="$(now_iso)"
         if [[ "$rc" -ne 0 ]]; then
-          printf 'terminal wait-for-busy failed rc=%s\n' "$rc" >"$last_message_file"
-          if [[ "$TERMINAL_ASAP_REQUIRE_BUSY" == "0" ]]; then
-            printf 'terminal wait-for-busy failed rc=%s; continuing because ASAP busy detection is advisory\n' "$rc" >"$last_message_file"
-            rc=0
-            LAST_EXIT_CODE="$rc"
-          fi
+          printf 'terminal wait-for-idle after asap send failed rc=%s\n' "$rc" >"$last_message_file"
         fi
       elif (( capture_terminal_output )); then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
@@ -1095,11 +1103,6 @@ run_job_once() {
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
     fi
 
-    if [[ "$rc" -eq 0 && "${SCHEDULE_MODE:-fixed}" == "asap" && "$TERMINAL_ASAP_QUEUE_DELAY" != "0" ]]; then
-      sleep "$TERMINAL_ASAP_QUEUE_DELAY"
-      LAST_RUN_FINISHED_AT="$(now_iso)"
-    fi
-
     record_loop_reflection "$jobdir"
 
     if [[ "${STATUS:-active}" == "active" && "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
@@ -1112,7 +1115,7 @@ run_job_once() {
       STATUS="paused"
       NEXT_RUN_EPOCH="0"
       NEXT_RUN_AT=""
-      LAST_NOTE="paused after terminal send because Codex busy/start state was not observed"
+      LAST_NOTE="paused after terminal send because Codex idle/turn completion was not observed"
       save_job "$jobdir"
     elif [[ "${STATUS:-active}" == "active" ]]; then
       schedule_next_run "$jobdir" "$rc" "terminal loop exited with status $rc"
@@ -1180,6 +1183,7 @@ create_job() {
   local target_window_id=""
   local target_title_pattern=""
   local target_tty=""
+  local target_tmux_pane=""
   local send_delay="0"
   local max_runs="0"
 
@@ -1233,6 +1237,12 @@ create_job() {
         target_tty="$2"
         shift 2
         ;;
+      --tmux-pane)
+        [[ $# -ge 2 ]] || die "--tmux-pane requires a value"
+        mode="terminal"
+        target_tmux_pane="$2"
+        shift 2
+        ;;
       --send-delay)
         [[ $# -ge 2 ]] || die "--send-delay requires a value"
         send_delay="$2"
@@ -1253,10 +1263,13 @@ create_job() {
   [[ -d "$cwd" ]] || die "working directory not found: $cwd"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
-  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" ]]; then
-    target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, or running codex-loop from the target Terminal Codex session"
+  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
+    target_tmux_pane="$(current_tmux_pane || true)"
+    if [[ -z "$target_tmux_pane" ]]; then
+      target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, --tmux-pane, or running codex-loop from the target Terminal Codex session"
+    fi
   fi
-  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty")}"
+  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1305,6 +1318,7 @@ create_job() {
   TARGET_WINDOW_ID="$target_window_id"
   TARGET_TITLE_PATTERN="$target_title_pattern"
   TARGET_TTY="$target_tty"
+  TARGET_TMUX_PANE="$target_tmux_pane"
   SEND_DELAY="$send_delay"
   SCHEDULE_MODE="$schedule_mode"
   PROMPT_SOURCE="$prompt_source"
@@ -1325,7 +1339,7 @@ Run limit: ${MAX_RUNS:-0}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
+Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$jobdir")
 EOF
@@ -1345,6 +1359,7 @@ ensure_job() {
   local target_window_id=""
   local target_title_pattern=""
   local target_tty=""
+  local target_tmux_pane=""
   local send_delay="0"
   local max_runs="0"
 
@@ -1398,6 +1413,12 @@ ensure_job() {
         target_tty="$2"
         shift 2
         ;;
+      --tmux-pane)
+        [[ $# -ge 2 ]] || die "--tmux-pane requires a value"
+        mode="terminal"
+        target_tmux_pane="$2"
+        shift 2
+        ;;
       --send-delay)
         [[ $# -ge 2 ]] || die "--send-delay requires a value"
         send_delay="$2"
@@ -1421,10 +1442,13 @@ ensure_job() {
   cwd="$(cd "$cwd" && pwd)"
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
-  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" ]]; then
-    target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, or running codex-loop from the target Terminal Codex session"
+  if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
+    target_tmux_pane="$(current_tmux_pane || true)"
+    if [[ -z "$target_tmux_pane" ]]; then
+      target_tty="$(current_tty)" || die "terminal loop requires --window-id, --title-pattern, --tmux-pane, or running codex-loop from the target Terminal Codex session"
+    fi
   fi
-  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty")}"
+  target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1437,7 +1461,7 @@ ensure_job() {
   if selected="$(resolve_jobdir "$job_name" 2>/dev/null)"; then
     load_job "$selected"
     selected_prompt="$(cat "$selected/prompt.txt" 2>/dev/null || true)"
-    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${SEND_DELAY:-0}" != "$send_delay" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
+    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${TARGET_TMUX_PANE:-}" != "$target_tmux_pane" || "${SEND_DELAY:-0}" != "$send_delay" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
       spec_changed=1
     fi
 
@@ -1450,6 +1474,7 @@ ensure_job() {
     TARGET_WINDOW_ID="$target_window_id"
     TARGET_TITLE_PATTERN="$target_title_pattern"
     TARGET_TTY="$target_tty"
+    TARGET_TMUX_PANE="$target_tmux_pane"
     SEND_DELAY="$send_delay"
     MAX_RUNS="$max_runs"
     SCHEDULE_MODE="$schedule_mode"
@@ -1499,7 +1524,7 @@ Run limit: ${MAX_RUNS:-0}
 Next run: $NEXT_RUN_AT
 Working directory: $CWD
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
+Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$selected")
 EOF
@@ -1515,6 +1540,8 @@ EOF
   fi
   if [[ -n "$target_tty" ]]; then
     create_args+=(--tty "$target_tty")
+  elif [[ -n "$target_tmux_pane" ]]; then
+    create_args+=(--tmux-pane "$target_tmux_pane")
   elif [[ -n "$target_window_id" ]]; then
     create_args+=(--window-id "$target_window_id")
   elif [[ -n "$target_title_pattern" ]]; then
@@ -1573,7 +1600,7 @@ Prompt source: ${PROMPT_SOURCE:-inline}
 Run limit: ${MAX_RUNS:-0}
 Next run: ${NEXT_RUN_AT:-}
 Mode: ${MODE:-terminal}
-Terminal target: window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
+Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Send delay: ${SEND_DELAY:-0}
 Session id: ${SESSION_ID:-}
 Worker pid: ${PID:-}

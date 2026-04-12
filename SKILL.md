@@ -14,7 +14,7 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
 4. New loop jobs must target the current Terminal Codex session. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
-5. Target binding must be reliable. Prefer creating the loop from inside the target Codex Terminal session so `codex-loop` can bind that Terminal tab's TTY. If creating from another session, pass `--tty /dev/ttysNNN`, `--window-id ID`, or `--title-pattern TEXT`; do not rely on front-window guessing.
+5. Target binding must be reliable. If the target Codex session is inside tmux, prefer `--tmux-pane %NN` or create the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain Terminal tab, use `--tty /dev/ttysNNN`, `--window-id ID`, or `--title-pattern TEXT`; do not rely on front-window guessing.
 6. The background worker only schedules and queues Terminal input. The actual reasoning and tool work happen in the current Terminal Codex session.
 
 ## Commands
@@ -27,7 +27,7 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
   `codex-loop --count 5 -- "asap continue"`
 - Create or ensure a loop that sends the prompt back into a Terminal Codex session:
   `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
-  Use `--tty /dev/ttysNNN` for the most reliable Terminal tab binding, or `--title-pattern TEXT` when the Terminal title is stable.
+  Use `--tmux-pane %NN` when the target Codex session is inside tmux; this is preferred over Terminal focus. Use `--tty /dev/ttysNNN` for a Terminal tab outside tmux, or `--title-pattern TEXT` when the Terminal title is stable.
 - List loops:
   `codex-loop list`
 - Show details for one loop:
@@ -60,7 +60,7 @@ Mirror Claude's `/loop` surface syntax:
 
 Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
-`asap` mode aggressively queues the next iteration as soon as the prior send is accepted. In `terminal` mode it does not wait for the bound Terminal tab to become idle; it sends the prompt, waits briefly, then probes for a busy/working state before scheduling the next ASAP fire immediately. Busy detection is advisory by default because Terminal content heuristics can be unreliable while prompts are queued; set `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1` to restore fail-closed behavior. A sender-side queue cooldown may be applied between sends to avoid flooding, but it must not change the job's `asap` schedule metadata. The default cooldown is 30 seconds and can be overridden with `CODEX_LOOP_TERMINAL_ASAP_QUEUE_DELAY`; the advisory busy probe timeout defaults to 3 seconds and can be overridden with `CODEX_LOOP_TERMINAL_ASAP_BUSY_TIMEOUT`.
+`asap` mode schedules the next iteration immediately, but terminal mode still waits until the bound target appears idle before injecting the prompt. This avoids appending a new prompt into an active Codex turn. After sending, ASAP waits for the turn to go busy and then idle again before scheduling the next immediate fire. The turn wait defaults to no timeout and can be bounded with `CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT`.
 
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
@@ -68,11 +68,11 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 ## Behavior
 
-- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound Terminal tab and presses Return via `codex-send-current.sh`. The binding is TTY/window/title based and must be captured at creation time. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
+- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. If the target session is inside tmux, bind and send by `--tmux-pane`/`tmux send-keys` instead of relying on mouse focus or AppleScript. Otherwise fall back to TTY/window/title binding. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
-  - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately after the bound target tab accepts Return. It intentionally does not wait for idle before sending the next prompt. Busy/turn-start detection is advisory by default and can be made fail-closed with `CODEX_LOOP_TERMINAL_ASAP_REQUIRE_BUSY=1`. A sender-side queue cooldown may delay the worker internally without changing the job to a fixed interval schedule.
+  - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately, but each terminal send waits for the target to be idle first, then waits for that turn to complete before scheduling the next immediate run. This preserves "never stop" without interrupting the active turn.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
