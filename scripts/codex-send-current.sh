@@ -15,6 +15,7 @@ PRINT_WINDOW_ID=0
 PRINT_CONTENTS=0
 WAIT_FOR_IDLE=0
 WAIT_IDLE_ONLY=0
+WAIT_BUSY_ONLY=0
 REQUIRE_BUSY_FIRST=0
 IDLE_TIMEOUT_SEC="0"
 QUIET=0
@@ -37,6 +38,7 @@ Options:
   --print-contents Print the resolved Terminal tab contents and exit.
   --wait-for-idle Wait until the target Codex Terminal appears idle before acting.
   --wait-idle-only Wait for idle, optionally print contents, and do not send text.
+  --wait-busy-only Wait for a busy/working state, optionally print contents, and do not send text.
   --require-busy-first With --wait-for-idle, require a busy/working state before accepting idle.
   --idle-timeout SEC Timeout for --wait-for-idle. 0 means no timeout.
   --quiet          Suppress the background scheduling line.
@@ -211,6 +213,28 @@ wait_for_busy_then_idle() {
   done
 }
 
+wait_for_busy() {
+  local wid="$1"
+  local timeout="$2"
+  local start now content
+  start="$(date +%s)"
+  while true; do
+    content="$(terminal_content "$wid" "$TARGET_TTY" 2>/dev/null || true)"
+    if is_codex_busy_text "$content"; then
+      return 0
+    fi
+
+    if [[ "$timeout" != "0" ]]; then
+      now="$(date +%s)"
+      if (( now - start >= timeout )); then
+        echo "timeout waiting for Codex busy state in Terminal window $wid" >&2
+        return 1
+      fi
+    fi
+    sleep 1
+  done
+}
+
 validate_non_negative_number() {
   local value="$1"
   local label="$2"
@@ -267,6 +291,10 @@ while [[ $# -gt 0 ]]; do
       WAIT_IDLE_ONLY=1
       shift
       ;;
+    --wait-busy-only)
+      WAIT_BUSY_ONLY=1
+      shift
+      ;;
     --require-busy-first)
       REQUIRE_BUSY_FIRST=1
       shift
@@ -305,7 +333,7 @@ done
 validate_non_negative_number "$DELAY_SEC" "delay"
 validate_non_negative_number "$IDLE_TIMEOUT_SEC" "idle-timeout"
 
-if [[ "$WAIT_IDLE_ONLY" -eq 1 ]]; then
+if [[ "$WAIT_IDLE_ONLY" -eq 1 || "$WAIT_BUSY_ONLY" -eq 1 ]]; then
   TEXT=""
 elif [[ "$READ_STDIN" -eq 1 ]]; then
   TEXT="$(cat)"
@@ -351,6 +379,14 @@ if [[ "$BACKGROUND" -eq 1 ]]; then
   log "scheduled pid=$! window_id=$WINDOW_ID delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
   if [[ "$QUIET" -eq 0 ]]; then
     printf 'started pid=%s window_id=%s delay=%s text=%s\n' "$!" "$WINDOW_ID" "$DELAY_SEC" "$TEXT"
+  fi
+  exit 0
+fi
+
+if [[ "$WAIT_BUSY_ONLY" -eq 1 ]]; then
+  wait_for_busy "$WINDOW_ID" "$IDLE_TIMEOUT_SEC"
+  if [[ "$PRINT_CONTENTS" -eq 1 ]]; then
+    terminal_content "$WINDOW_ID" "$TARGET_TTY"
   fi
   exit 0
 fi

@@ -1014,8 +1014,12 @@ run_job_once() {
       target_cmd+=(--tty "$TARGET_TTY")
     fi
     send_cmd=("${target_cmd[@]}" --delay "${SEND_DELAY:-0}" --stdin)
-    if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" || "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
+    if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" ]]; then
       send_cmd+=(--wait-for-idle)
+      capture_terminal_output=1
+    elif [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
+      # ASAP intentionally queues prompts behind the active Codex turn. It only
+      # verifies that the target entered a busy state after Return was sent.
       capture_terminal_output=1
     elif [[ "$REFLECTION_ENABLED" != "0" ]]; then
       capture_terminal_output=1
@@ -1054,7 +1058,18 @@ run_job_once() {
     LAST_EXIT_CODE="$rc"
 
     if [[ "$rc" -eq 0 ]]; then
-      if (( capture_terminal_output )); then
+      if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
+        sleep "$TERMINAL_AFTER_SEND_DELAY"
+        set +e
+        "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-busy-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+        rc="$?"
+        set -e
+        LAST_EXIT_CODE="$rc"
+        LAST_RUN_FINISHED_AT="$(now_iso)"
+        if [[ "$rc" -ne 0 ]]; then
+          printf 'terminal wait-for-busy failed rc=%s\n' "$rc" >"$last_message_file"
+        fi
+      elif (( capture_terminal_output )); then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
         "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
@@ -1084,7 +1099,7 @@ run_job_once() {
       STATUS="paused"
       NEXT_RUN_EPOCH="0"
       NEXT_RUN_AT=""
-      LAST_NOTE="paused after terminal send because Codex turn start/finish was not observed; prevents prompt concatenation"
+      LAST_NOTE="paused after terminal send because Codex busy/start state was not observed"
       save_job "$jobdir"
     elif [[ "${STATUS:-active}" == "active" ]]; then
       schedule_next_run "$jobdir" "$rc" "terminal loop exited with status $rc"
