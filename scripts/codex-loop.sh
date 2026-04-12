@@ -381,7 +381,7 @@ LOOP_REFLECTION_TARGET=<what changed about the loop target or its state>
 LOOP_REFLECTION_SELF=<one improvement or risk for this loop, prompt, or skill; write none if none>
 LOOP_REFLECTION_PROMPT=<one concrete prompt/skill adjustment to consider; write none if none>
 LOOP_REFLECTION_NEXT=<the smallest useful next action or verification>
-Do not edit the loop skill, loop prompt, or persistent config unless the user or current loop prompt explicitly authorizes self-improvement edits. If authorized, keep the patch narrow and verify it.
+Self-improvement edits to the loop skill or loop prompt are allowed when the reflection identifies a concrete defect or high-confidence improvement. Keep edits narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 EOF
   fi
 }
