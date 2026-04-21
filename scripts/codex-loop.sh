@@ -562,9 +562,33 @@ update_loop_state() {
   local tmp="$jobdir/state.md.tmp.$$.$RANDOM"
   local recent=""
   local recent_audit=""
+  local reflection_enabled=1
+  local key_decisions=""
+  local relevant_files=""
+  local recent_notes=""
 
-  recent="$(tail -n 80 "$jobdir/reflection.log" 2>/dev/null || true)"
+  load_job "$jobdir"
+  if [[ "${REFLECTION:-$REFLECTION_ENABLED}" == "0" ]]; then
+    reflection_enabled=0
+  fi
+
+  if (( reflection_enabled )); then
+    recent="$(tail -n 80 "$jobdir/reflection.log" 2>/dev/null || true)"
+    key_decisions=$'- Runtime prompts include compact LOOP_REFLECTION_* lines.\n- This state file is regenerated from the latest reflection plus a short reflection log tail.'
+    relevant_files=$'- prompt.txt\n- runtime_prompt.txt\n- audit.log\n- reflection.log\n- state.md\n- last_message.txt\n- run.log'
+  fi
   recent_audit="$(tail -n 40 "$jobdir/audit.log" 2>/dev/null || true)"
+  if (( ! reflection_enabled )); then
+    key_decisions=$'- Reflection is disabled for this job.\n- This state file is regenerated from audit output and current job metadata only.'
+    relevant_files=$'- prompt.txt\n- runtime_prompt.txt\n- audit.log\n- state.md\n- last_message.txt\n- run.log'
+  fi
+  if [[ -n "$recent" ]]; then
+    recent_notes="$recent"
+  elif (( ! reflection_enabled )) && [[ -n "$recent_audit" ]]; then
+    recent_notes="$recent_audit"
+  else
+    recent_notes='none'
+  fi
 
   {
     cat <<EOF
@@ -583,13 +607,13 @@ ${objective:-not reported}
 - Working directory: ${CWD:-}
 - Schedule: ${SCHEDULE_MODE:-fixed} / ${INTERVAL_INPUT:-}
 - Mode: ${MODE:-terminal}
-- Reflection may improve relevant skills, prompts, workflow docs, repo instructions, or this loop only through narrow, verified, committed edits.
+- Reflection: $([[ "$reflection_enabled" == "1" ]] && printf 'enabled' || printf 'disabled')
 
 ## Progress
 ### Latest Target State
 ${target:-none}
 
-### Loop/Prompt Reflection
+### Loop/Prompt Notes
 ${self:-none}
 
 ### Prompt Adjustment Candidate
@@ -599,17 +623,10 @@ ${prompt:-none}
 ${recent_audit:-not enabled or not reported}
 
 ## Key Decisions
-- Runtime prompts include compact LOOP_REFLECTION_* lines.
-- This state file is regenerated from the latest reflection plus a short reflection log tail.
+${key_decisions}
 
 ## Relevant Files
-- prompt.txt
-- runtime_prompt.txt
-- audit.log
-- reflection.log
-- state.md
-- last_message.txt
-- run.log
+${relevant_files}
 
 ## Next Steps
 ${next:-none}
@@ -621,13 +638,9 @@ ${next:-none}
 - Last exit code: ${LAST_EXIT_CODE:-}
 - Last note: ${LAST_NOTE:-}
 
-## Recent Reflections
+## Recent Notes
 EOF
-    if [[ -n "$recent" ]]; then
-      printf '%s\n' "$recent"
-    else
-      printf 'none\n'
-    fi
+    printf '%s\n' "$recent_notes"
   } >"$tmp"
 
   mv "$tmp" "$jobdir/state.md"
