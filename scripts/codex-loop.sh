@@ -1550,10 +1550,7 @@ create_job() {
   INTERVAL_SECONDS="$interval_seconds"
   INTERVAL_LABEL="$interval_label"
   CREATED_AT="$(now_iso)"
-  NEXT_RUN_EPOCH=$(( $(now_epoch) + INTERVAL_SECONDS ))
-  if (( start_now )); then
-    NEXT_RUN_EPOCH="$(now_epoch)"
-  fi
+  NEXT_RUN_EPOCH="$(now_epoch)"
   NEXT_RUN_AT="$(epoch_to_local "$NEXT_RUN_EPOCH")"
   SESSION_ID=""
   RUN_COUNT="0"
@@ -1776,9 +1773,6 @@ ensure_job() {
     STATUS="active"
     if (( start_now || spec_changed )); then
       NEXT_RUN_EPOCH="$(now_epoch)"
-      if (( ! start_now )); then
-        NEXT_RUN_EPOCH=$(( NEXT_RUN_EPOCH + INTERVAL_SECONDS ))
-      fi
     elif [[ -z "${NEXT_RUN_EPOCH:-}" || "$NEXT_RUN_EPOCH" == "0" ]]; then
       NEXT_RUN_EPOCH=$(( $(now_epoch) + INTERVAL_SECONDS ))
     fi
@@ -1799,7 +1793,7 @@ ensure_job() {
       : >"$selected/audit.log"
       : >"$selected/reflection.log"
       : >"$selected/state.md"
-      LAST_NOTE="spec updated; session reset"
+      LAST_NOTE="spec updated; session reset; first run starts immediately"
     elif [[ -n "$note" ]]; then
       LAST_NOTE="$note"
     fi

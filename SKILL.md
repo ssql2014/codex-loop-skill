@@ -14,9 +14,10 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
 4. New loop jobs must target the current visible Codex session by default. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
-5. Treat the default target as "current session only", whether that current session is a tmux pane or a plain terminal tab. If the target Codex session is inside tmux, prefer creating the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain terminal tab, create the loop from that tab so `codex-loop` can bind the current TTY. `--tty` should resolve real live sessions by TTY for Terminal.app or iTerm. Use `--tmux-pane`, `--tty`, `--window-id`, or `--title-pattern` only when you intentionally want to override the default target.
-6. The background worker only schedules and queues terminal input. The actual reasoning and tool work happen in the current visible Codex session.
-7. A chat/API call does not itself have a current terminal session. If `/loop` is invoked from chat rather than from inside a live terminal, do not guess. Either pass an explicit target or resolve the target session first by TTY/pane.
+5. New loop jobs should execute one first cycle immediately after creation or spec update, then follow their fixed/dynamic/asap schedule after that.
+6. Treat the default target as "current session only", whether that current session is a tmux pane or a plain terminal tab. If the target Codex session is inside tmux, prefer creating the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain terminal tab, create the loop from that tab so `codex-loop` can bind the current TTY. `--tty` should resolve real live sessions by TTY for Terminal.app or iTerm. Use `--tmux-pane`, `--tty`, `--window-id`, or `--title-pattern` only when you intentionally want to override the default target.
+7. The background worker only schedules and queues terminal input. The actual reasoning and tool work happen in the current visible Codex session.
+8. A chat/API call does not itself have a current terminal session. If `/loop` is invoked from chat rather than from inside a live terminal, do not guess. Either pass an explicit target or resolve the target session first by TTY/pane.
 
 ## Pre-Send Idle Gate
 
@@ -80,7 +81,7 @@ Mirror Claude's `/loop` surface syntax:
 - `15m`
 - empty input
 
-Prompt-only input uses Claude-style dynamic scheduling: the first delay starts at 10 minutes, then each run may choose the next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
+Prompt-only input uses Claude-style dynamic scheduling: the loop executes one first cycle immediately, then the next delay starts at 10 minutes unless a run chooses a different next delay from 1 minute to 1 hour by writing `CODEX_LOOP_NEXT_DELAY=<duration>` in its final message.
 
 `asap` mode schedules the next iteration immediately, but terminal mode still waits until the bound target appears idle before injecting the prompt. If `--require-end-tag` is enabled, terminal mode also waits until the latest session tag is `[end xxx]`. This avoids appending a new prompt into an active Codex turn. After sending, ASAP waits for the turn to go busy and then idle again before scheduling the next immediate fire. The turn wait defaults to no timeout and can be bounded with `CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT`.
 
@@ -95,6 +96,10 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
   - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately, but each terminal send waits for the target to be idle first, then waits for that turn to complete before scheduling the next immediate run. With `--require-end-tag`, it also requires the latest observed session tag to be `[end xxx]` before sending the next cycle. This preserves "never stop" without interrupting the active turn.
+- Creation/update behavior:
+  - new jobs run one first cycle immediately
+  - `ensure` with a changed spec also runs one first cycle immediately
+  - after that first cycle, the configured fixed/dynamic/asap schedule takes over
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues terminal injection and uses TTY-bound session contents for post-send idle detection.
