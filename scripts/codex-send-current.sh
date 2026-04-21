@@ -360,6 +360,123 @@ send_tmux_payload() {
   fi
 }
 
+focus_iterm_session() {
+  local session_id="$1"
+  osascript - "$session_id" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            tell w
+              set current tab to t
+            end tell
+            tell t
+              set current session to s
+            end tell
+            activate
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
+}
+
+send_iterm_payload() {
+  local session_id="$1"
+  local payload="$2"
+  local press_enter="$3"
+  osascript - "$session_id" "$payload" "$press_enter" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  set payload to item 2 of argv
+  set pressEnter to ((item 3 of argv) as integer)
+
+  set hadClipboard to true
+  set oldClipboard to ""
+  try
+    set oldClipboard to the clipboard
+  on error
+    set hadClipboard to false
+  end try
+
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            tell w
+              set current tab to t
+            end tell
+            tell t
+              set current session to s
+            end tell
+            activate
+            delay 0.15
+            set the clipboard to payload
+            delay 0.05
+            tell application "System Events"
+              keystroke "v" using command down
+            end tell
+            if pressEnter is 1 then
+              delay 0.12
+              tell application "System Events"
+                key code 36
+              end tell
+            end if
+            if hadClipboard then
+              delay 0.05
+              set the clipboard to oldClipboard
+            end if
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
+}
+
+send_iterm_enter() {
+  local session_id="$1"
+  osascript - "$session_id" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            tell w
+              set current tab to t
+            end tell
+            tell t
+              set current session to s
+            end tell
+            activate
+            delay 0.1
+            tell application "System Events"
+              key code 36
+            end tell
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --window-id)
@@ -559,33 +676,28 @@ if [[ -n "$TARGET_TMUX_PANE" ]]; then
 fi
 
 if [[ "$WINDOW_ID" == iterm:* ]]; then
-  osascript - "${WINDOW_ID#iterm:}" "$TEXT" "$PRESS_ENTER" <<'APPLESCRIPT'
-on run argv
-  set targetSessionId to item 1 of argv
-  set payload to item 2 of argv
-  set pressEnter to ((item 3 of argv) as integer)
+  session_id="${WINDOW_ID#iterm:}"
+  if [[ "$PRESS_ENTER" -eq 0 ]]; then
+    send_iterm_payload "$session_id" "$TEXT" "$PRESS_ENTER"
+    log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+    exit 0
+  fi
 
-  tell application "iTerm2"
-    repeat with w in windows
-      repeat with t in tabs of w
-        repeat with s in sessions of t
-          if (id of s as text) is targetSessionId then
-            if pressEnter is 1 then
-              tell s to write text payload
-            else
-              tell s to write text payload newline NO
-            end if
-            return
-          end if
-        end repeat
-      end repeat
-    end repeat
-  end tell
-  error "No iTerm session matches id: " & targetSessionId
-end run
-APPLESCRIPT
-  log "sent iterm_session=${WINDOW_ID#iterm:} delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
-  exit 0
+  send_iterm_payload "$session_id" "$TEXT" "$PRESS_ENTER"
+  if wait_for_busy "$WINDOW_ID" "2" >/dev/null 2>&1; then
+    log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=submitted"
+    exit 0
+  fi
+
+  send_iterm_enter "$session_id"
+  if wait_for_busy "$WINDOW_ID" "2" >/dev/null 2>&1; then
+    log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=submitted_after_retry"
+    exit 0
+  fi
+
+  log "failed iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+  echo "iTerm submit not observed for session $session_id" >&2
+  exit 1
 fi
 
 osascript - "$WINDOW_ID" "$TARGET_TTY" "$TEXT" "$PRESS_ENTER" <<'APPLESCRIPT'
