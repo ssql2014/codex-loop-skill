@@ -11,7 +11,7 @@ DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
 TERMINAL_ASAP_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT:-0}"
-TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-120}"
+TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-900}"
 TERMINAL_REQUIRE_END_TAG_DEFAULT="${CODEX_LOOP_TERMINAL_REQUIRE_END_TAG:-0}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
 FIELD_SEP=$'\034'
@@ -23,13 +23,13 @@ REFLECTION_ENABLED="${CODEX_LOOP_REFLECTION:-1}"
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -47,6 +47,7 @@ Examples:
   codex-loop
   codex-loop ensure --name deploy-watch --cwd "$PWD" -- "5m check the deploy"
   codex-loop ensure --name current-audit --mode terminal --window-id 40000 -- "10m audit the live evas session"
+  codex-loop ensure --name guarded-fix --supervise --supervisor-file .codex/loop-supervisor.md -- "asap continue until the issue is fixed"
   codex-loop list
   codex-loop show ab12cd34
   codex-loop run-now ab12cd34
@@ -180,6 +181,9 @@ load_job() {
   PROMPT_SOURCE="inline"
   MAX_RUNS="0"
   REQUIRE_END_TAG="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
+  SUPERVISE="0"
+  SUPERVISOR_FILE=""
+  REFLECTION="$REFLECTION_ENABLED"
   # shellcheck disable=SC1090
   source "$jobdir/meta.env"
   MODE="${MODE:-terminal}"
@@ -192,7 +196,12 @@ load_job() {
   PROMPT_SOURCE="${PROMPT_SOURCE:-inline}"
   MAX_RUNS="${MAX_RUNS:-0}"
   REQUIRE_END_TAG="${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}"
+  SUPERVISE="${SUPERVISE:-0}"
+  SUPERVISOR_FILE="${SUPERVISOR_FILE:-}"
+  REFLECTION="${REFLECTION:-$REFLECTION_ENABLED}"
   validate_bool_flag "$REQUIRE_END_TAG" "REQUIRE_END_TAG"
+  validate_bool_flag "$SUPERVISE" "SUPERVISE"
+  validate_bool_flag "$REFLECTION" "REFLECTION"
 }
 
 save_job() {
@@ -223,6 +232,9 @@ TARGET_TTY='$(escape_squotes "${TARGET_TTY:-}")'
 TARGET_TMUX_PANE='$(escape_squotes "${TARGET_TMUX_PANE:-}")'
 SEND_DELAY='$(escape_squotes "${SEND_DELAY:-0}")'
 REQUIRE_END_TAG='$(escape_squotes "${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}")'
+SUPERVISE='$(escape_squotes "${SUPERVISE:-0}")'
+SUPERVISOR_FILE='$(escape_squotes "${SUPERVISOR_FILE:-}")'
+REFLECTION='$(escape_squotes "${REFLECTION:-$REFLECTION_ENABLED}")'
 SCHEDULE_MODE='$(escape_squotes "${SCHEDULE_MODE:-fixed}")'
 PROMPT_SOURCE='$(escape_squotes "${PROMPT_SOURCE:-inline}")'
 MAX_RUNS='$(escape_squotes "${MAX_RUNS:-0}")'
@@ -408,6 +420,73 @@ resolve_default_prompt() {
   default_maintenance_prompt
 }
 
+resolve_supervisor_file() {
+  local cwd="${1:-$PWD}"
+  local explicit="${2:-}"
+  if [[ -n "$explicit" ]]; then
+    if [[ "$explicit" != /* ]]; then
+      explicit="$cwd/$explicit"
+    fi
+    [[ -f "$explicit" ]] || die "supervisor file not found: $explicit"
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  local candidate
+  for candidate in \
+    "$cwd/.codex/loop-supervisor.md" \
+    "$cwd/.claude/SUPERVISOR.md" \
+    "$cwd/SUPERVISOR.md" \
+    "$HOME/.codex/loop-supervisor.md" \
+    "$HOME/.claude/SUPERVISOR.md"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+append_supervisor_instruction() {
+  local criteria_file="${SUPERVISOR_FILE:-}"
+
+  cat <<'EOF'
+
+Codex-loop supervised-run instruction:
+This loop is running with CCC-inspired inline supervision. Treat the end of this turn like a stop-hook checkpoint: before your final answer, audit the work you just did against the loop objective, the user's latest request, repo instructions, and any supervisor criteria below.
+
+Safety rules:
+- Do not create, restart, cancel, or modify loop jobs from this supervised instruction unless the user explicitly asked for loop management.
+- Do not recursively invoke `/loop`, `/audit`, `codex-loop`, or another supervisor from this instruction.
+- Do not edit the loop skill, supervisor criteria, workflow docs, or other skills unless that is directly required by the loop objective and the change is narrow, verified, and reported.
+- If the turn is blocked, unsafe, or incomplete, say so and choose the smallest concrete next action rather than claiming completion.
+
+At the end of your final response, include these machine-readable lines:
+LOOP_AUDIT_VERDICT=<PASS|FAIL|HOLD>
+LOOP_AUDIT_REASON=<one short reason tied to evidence>
+LOOP_AUDIT_NEXT=<the smallest useful next action or verification>
+EOF
+
+  if [[ -n "$criteria_file" && -f "$criteria_file" ]]; then
+    cat <<EOF
+
+Supervisor criteria from: $criteria_file
+--- BEGIN SUPERVISOR CRITERIA ---
+$(head -c 65536 "$criteria_file")
+--- END SUPERVISOR CRITERIA ---
+EOF
+  else
+    cat <<'EOF'
+
+Default supervisor criteria:
+- The requested work is actually completed or the blocker is explicit.
+- Claims are backed by files, command results, tests, or concrete observations.
+- No unrelated edits, destructive commands, or hidden background work were introduced.
+- Any follow-up is specific and immediately actionable.
+EOF
+  fi
+}
+
 base_prompt_for_job() {
   local jobdir="$1"
   load_job "$jobdir"
@@ -436,7 +515,7 @@ Choose the delay based on urgency, expected external latency, and how soon usefu
 EOF
   fi
 
-  if [[ "$REFLECTION_ENABLED" != "0" ]]; then
+  if [[ "${REFLECTION:-$REFLECTION_ENABLED}" != "0" ]]; then
     cat <<'EOF'
 
 Codex-loop reflection instruction:
@@ -448,6 +527,10 @@ LOOP_REFLECTION_PROMPT=<one concrete adjustment to a relevant prompt, skill, wor
 LOOP_REFLECTION_NEXT=<the smallest useful next action or verification>
 Self-improvement edits are allowed when the reflection identifies a concrete defect or high-confidence improvement in any relevant user/project skill, prompt, workflow doc, repo instruction, or this loop. Keep edits narrow and scope-relevant, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 EOF
+  fi
+
+  if bool_enabled "${SUPERVISE:-0}"; then
+    append_supervisor_instruction
   fi
 }
 
@@ -478,8 +561,10 @@ update_loop_state() {
   local next="$6"
   local tmp="$jobdir/state.md.tmp.$$.$RANDOM"
   local recent=""
+  local recent_audit=""
 
   recent="$(tail -n 80 "$jobdir/reflection.log" 2>/dev/null || true)"
+  recent_audit="$(tail -n 40 "$jobdir/audit.log" 2>/dev/null || true)"
 
   {
     cat <<EOF
@@ -510,6 +595,9 @@ ${self:-none}
 ### Prompt Adjustment Candidate
 ${prompt:-none}
 
+## Supervision
+${recent_audit:-not enabled or not reported}
+
 ## Key Decisions
 - Runtime prompts include compact LOOP_REFLECTION_* lines.
 - This state file is regenerated from the latest reflection plus a short reflection log tail.
@@ -517,6 +605,7 @@ ${prompt:-none}
 ## Relevant Files
 - prompt.txt
 - runtime_prompt.txt
+- audit.log
 - reflection.log
 - state.md
 - last_message.txt
@@ -544,10 +633,33 @@ EOF
   mv "$tmp" "$jobdir/state.md"
 }
 
+record_loop_audit() {
+  local jobdir="$1"
+  local message_file="$jobdir/last_message.txt"
+  local verdict reason next
+  bool_enabled "${SUPERVISE:-0}" || return 0
+  verdict="$(extract_keyed_line "$message_file" "LOOP_AUDIT_VERDICT" || true)"
+  reason="$(extract_keyed_line "$message_file" "LOOP_AUDIT_REASON" || true)"
+  next="$(extract_keyed_line "$message_file" "LOOP_AUDIT_NEXT" || true)"
+  [[ -n "$verdict$reason$next" ]] || return 0
+
+  {
+    printf '[%s] job=%s run=%s\n' "$(now_iso)" "${JOB_ID:-}" "${RUN_COUNT:-}"
+    printf 'verdict=%s\n' "$verdict"
+    printf 'reason=%s\n' "$reason"
+    printf 'next=%s\n\n' "$next"
+  } >>"$jobdir/audit.log"
+
+  update_loop_state "$jobdir" "" "" "" "" "$next"
+}
+
 record_loop_reflection() {
   local jobdir="$1"
   local message_file="$jobdir/last_message.txt"
   local objective target self prompt next
+  if [[ "${REFLECTION:-$REFLECTION_ENABLED}" == "0" ]]; then
+    return 0
+  fi
   objective="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_OBJECTIVE" || true)"
   target="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_TARGET" || true)"
   self="$(extract_keyed_line "$message_file" "LOOP_REFLECTION_SELF" || true)"
@@ -1088,11 +1200,17 @@ run_job_once() {
       # "append to whatever is currently being typed or processed".
       send_cmd+=(--wait-for-idle)
       capture_terminal_output=1
-    elif [[ "$REFLECTION_ENABLED" != "0" ]]; then
+    elif [[ "${REFLECTION:-$REFLECTION_ENABLED}" != "0" ]]; then
       capture_terminal_output=1
     fi
     if bool_enabled "${REQUIRE_END_TAG:-0}"; then
       capture_terminal_output=1
+    fi
+    if (( capture_terminal_output )) && [[ "${SCHEDULE_MODE:-fixed}" == "fixed" ]]; then
+      # Fixed terminal loops with reflection still need the same pre-send idle
+      # gate as dynamic/asap loops. Without this, the prompt can be pasted into
+      # an active TUI turn, and post-send detection becomes unreliable.
+      send_cmd+=(--wait-for-idle)
     fi
 
     started_at="$(now_iso)"
@@ -1168,7 +1286,7 @@ run_job_once() {
       elif (( capture_terminal_output )); then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
-        "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
+        "${target_cmd[@]}" --idle-timeout "$TERMINAL_TURN_TIMEOUT" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
         rc="$?"
         set -e
         LAST_EXIT_CODE="$rc"
@@ -1183,6 +1301,7 @@ run_job_once() {
       printf 'terminal send failed rc=%s\n' "$rc" >"$last_message_file"
     fi
 
+    record_loop_audit "$jobdir"
     record_loop_reflection "$jobdir"
 
     if [[ "${STATUS:-active}" == "active" && "${MAX_RUNS:-0}" != "0" && "${RUN_COUNT:-0}" -ge "${MAX_RUNS:-0}" ]]; then
@@ -1267,6 +1386,8 @@ create_job() {
   local send_delay="0"
   local max_runs="0"
   local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
+  local supervise="0"
+  local supervisor_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1338,6 +1459,20 @@ create_job() {
         require_end_tag="0"
         shift
         ;;
+      --supervise|--audit|--self-audit)
+        supervise="1"
+        shift
+        ;;
+      --no-supervise|--no-audit)
+        supervise="0"
+        shift
+        ;;
+      --supervisor-file)
+        [[ $# -ge 2 ]] || die "--supervisor-file requires a value"
+        supervise="1"
+        supervisor_file="$2"
+        shift 2
+        ;;
       --)
         shift
         break
@@ -1353,6 +1488,7 @@ create_job() {
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
   validate_bool_flag "$require_end_tag" "--require-end-tag"
+  validate_bool_flag "$supervise" "--supervise"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
@@ -1360,6 +1496,15 @@ create_job() {
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
+  if bool_enabled "$supervise"; then
+    if [[ -n "$supervisor_file" ]]; then
+      supervisor_file="$(resolve_supervisor_file "$(cd "$cwd" && pwd)" "$supervisor_file")"
+    else
+      supervisor_file="$(resolve_supervisor_file "$(cd "$cwd" && pwd)" "" 2>/dev/null || true)"
+    fi
+  else
+    supervisor_file=""
+  fi
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1379,6 +1524,7 @@ create_job() {
   : >"$jobdir/last_message.txt"
   : >"$jobdir/last_run.jsonl"
   : >"$jobdir/runtime_prompt.txt"
+  : >"$jobdir/audit.log"
   : >"$jobdir/reflection.log"
   : >"$jobdir/state.md"
   : >"$jobdir/worker.log"
@@ -1411,6 +1557,9 @@ create_job() {
   TARGET_TMUX_PANE="$target_tmux_pane"
   SEND_DELAY="$send_delay"
   REQUIRE_END_TAG="$require_end_tag"
+  SUPERVISE="$supervise"
+  SUPERVISOR_FILE="$supervisor_file"
+  REFLECTION="$REFLECTION_ENABLED"
   SCHEDULE_MODE="$schedule_mode"
   PROMPT_SOURCE="$prompt_source"
   LAST_NOTE="$note"
@@ -1432,6 +1581,7 @@ Working directory: $CWD
 Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Require end tag: ${REQUIRE_END_TAG:-0}
+Supervise: ${SUPERVISE:-0}${SUPERVISOR_FILE:+ ($SUPERVISOR_FILE)}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$jobdir")
 EOF
@@ -1455,6 +1605,8 @@ ensure_job() {
   local send_delay="0"
   local max_runs="0"
   local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
+  local supervise="0"
+  local supervisor_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1526,6 +1678,20 @@ ensure_job() {
         require_end_tag="0"
         shift
         ;;
+      --supervise|--audit|--self-audit)
+        supervise="1"
+        shift
+        ;;
+      --no-supervise|--no-audit)
+        supervise="0"
+        shift
+        ;;
+      --supervisor-file)
+        [[ $# -ge 2 ]] || die "--supervisor-file requires a value"
+        supervise="1"
+        supervisor_file="$2"
+        shift 2
+        ;;
       --)
         shift
         break
@@ -1544,6 +1710,7 @@ ensure_job() {
   validate_mode "$mode"
   validate_non_negative_number "$send_delay" "--send-delay"
   validate_bool_flag "$require_end_tag" "--require-end-tag"
+  validate_bool_flag "$supervise" "--supervise"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
@@ -1551,6 +1718,15 @@ ensure_job() {
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
+  if bool_enabled "$supervise"; then
+    if [[ -n "$supervisor_file" ]]; then
+      supervisor_file="$(resolve_supervisor_file "$cwd" "$supervisor_file")"
+    else
+      supervisor_file="$(resolve_supervisor_file "$cwd" "" 2>/dev/null || true)"
+    fi
+  else
+    supervisor_file=""
+  fi
 
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
@@ -1563,7 +1739,7 @@ ensure_job() {
   if selected="$(resolve_jobdir "$job_name" 2>/dev/null)"; then
     load_job "$selected"
     selected_prompt="$(cat "$selected/prompt.txt" 2>/dev/null || true)"
-    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${TARGET_TMUX_PANE:-}" != "$target_tmux_pane" || "${SEND_DELAY:-0}" != "$send_delay" || "${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}" != "$require_end_tag" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
+    if [[ "$CWD" != "$cwd" || "$INTERVAL_INPUT" != "$interval_input" || "$selected_prompt" != "$prompt" || "${SCHEDULE_MODE:-fixed}" != "$schedule_mode" || "${PROMPT_SOURCE:-inline}" != "$prompt_source" || "${MODE:-terminal}" != "$mode" || "${TARGET_WINDOW_ID:-}" != "$target_window_id" || "${TARGET_TITLE_PATTERN:-}" != "$target_title_pattern" || "${TARGET_TTY:-}" != "$target_tty" || "${TARGET_TMUX_PANE:-}" != "$target_tmux_pane" || "${SEND_DELAY:-0}" != "$send_delay" || "${REQUIRE_END_TAG:-$TERMINAL_REQUIRE_END_TAG_DEFAULT}" != "$require_end_tag" || "${SUPERVISE:-0}" != "$supervise" || "${SUPERVISOR_FILE:-}" != "$supervisor_file" || "${MAX_RUNS:-0}" != "$max_runs" ]]; then
       spec_changed=1
     fi
 
@@ -1579,6 +1755,8 @@ ensure_job() {
     TARGET_TMUX_PANE="$target_tmux_pane"
     SEND_DELAY="$send_delay"
     REQUIRE_END_TAG="$require_end_tag"
+    SUPERVISE="$supervise"
+    SUPERVISOR_FILE="$supervisor_file"
     MAX_RUNS="$max_runs"
     SCHEDULE_MODE="$schedule_mode"
     PROMPT_SOURCE="$prompt_source"
@@ -1605,6 +1783,7 @@ ensure_job() {
       : >"$selected/last_message.txt"
       : >"$selected/last_run.jsonl"
       : >"$selected/runtime_prompt.txt"
+      : >"$selected/audit.log"
       : >"$selected/reflection.log"
       : >"$selected/state.md"
       LAST_NOTE="spec updated; session reset"
@@ -1629,6 +1808,7 @@ Working directory: $CWD
 Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Require end tag: ${REQUIRE_END_TAG:-0}
+Supervise: ${SUPERVISE:-0}${SUPERVISOR_FILE:+ ($SUPERVISOR_FILE)}
 Session id: ${SESSION_ID:-pending}
 Prompt: $(job_prompt_preview "$selected")
 EOF
@@ -1636,6 +1816,14 @@ EOF
   fi
 
   local -a create_args=(--name "$job_name" --cwd "$cwd" --mode "$mode" --send-delay "$send_delay")
+  if bool_enabled "$supervise"; then
+    create_args+=(--supervise)
+    if [[ -n "$supervisor_file" ]]; then
+      create_args+=(--supervisor-file "$supervisor_file")
+    fi
+  else
+    create_args+=(--no-supervise)
+  fi
   if bool_enabled "$require_end_tag"; then
     create_args+=(--require-end-tag)
   else
@@ -1712,6 +1900,9 @@ Mode: ${MODE:-terminal}
 Terminal target: tmux_pane=${TARGET_TMUX_PANE:-} window=${TARGET_WINDOW_ID:-} title=${TARGET_TITLE_PATTERN:-} tty=${TARGET_TTY:-}
 Send delay: ${SEND_DELAY:-0}
 Require end tag: ${REQUIRE_END_TAG:-0}
+Supervise: ${SUPERVISE:-0}
+Supervisor file: ${SUPERVISOR_FILE:-}
+Reflection: ${REFLECTION:-$REFLECTION_ENABLED}
 Session id: ${SESSION_ID:-}
 Worker pid: ${PID:-}
 Child pid: ${CURRENT_CHILD_PID:-}
@@ -1726,6 +1917,7 @@ $(base_prompt_for_job "$jobdir")
 Artifacts:
   $jobdir/prompt.txt
   $jobdir/runtime_prompt.txt
+  $jobdir/audit.log
   $jobdir/reflection.log
   $jobdir/state.md
   $jobdir/run.log

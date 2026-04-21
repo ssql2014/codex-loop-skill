@@ -42,6 +42,12 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 - Create or ensure a session-tag gated loop:
   `codex-loop ensure --name JOB_NAME --mode terminal --tmux-pane %NN --require-end-tag --cwd "$PWD" -- "<raw loop input>"`
   Use this for recurring Codex sessions that emit `[start xxx]` at the beginning of a full session and `[end xxx]` only after the final response is complete.
+- Create or ensure a CCC-inspired supervised loop:
+  `codex-loop ensure --name JOB_NAME --supervise --supervisor-file .codex/loop-supervisor.md --cwd "$PWD" -- "<raw loop input>"`
+  This appends an inline stop-check to every loop prompt and records `LOOP_AUDIT_*` lines in `audit.log` and `state.md`. It is intentionally not a separate model fork.
+- Create a companion audit loop when independent review matters:
+  `codex-loop ensure --name JOB_NAME-audit --mode terminal --tmux-pane %AUDITOR --cwd "$PWD" -- "5m /audit %TARGET <criteria>"`
+  Prefer a separate auditor pane/session for this pattern. Do not point an audit loop at the same busy target unless the prompt is purely read-only and idle-gated.
 - List loops:
   `codex-loop list`
 - Show details for one loop:
@@ -97,8 +103,20 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Reflection may improve relevant user/project skills, prompts, workflow docs, repo instructions, or the loop itself when it finds a concrete defect or high-confidence improvement. Keep self-improvement edits scope-relevant and narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
-  `prompt.txt`, `runtime_prompt.txt`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
+  `prompt.txt`, `runtime_prompt.txt`, `audit.log`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
 - The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`; `loop` no longer depends on the separate `auto-continue` skill.
+
+## CCC-Style Supervision
+
+Use `--supervise` when the loop is likely to keep iterating on a task and needs a lightweight stop-check after each turn. This borrows the useful part of `ccc` supervisor behavior, but keeps the loop architecture simple:
+
+- The Codex equivalent of a `stop` hook is the existing post-send idle/final capture. `codex-loop` waits for the target turn to complete, captures the terminal output, then extracts audit/reflection lines.
+- `--supervise` adds an inline audit contract to the loop prompt. The target must emit `LOOP_AUDIT_VERDICT=PASS|FAIL|HOLD`, `LOOP_AUDIT_REASON=...`, and `LOOP_AUDIT_NEXT=...`.
+- Criteria are loaded from `--supervisor-file`, or automatically from `.codex/loop-supervisor.md`, `.claude/SUPERVISOR.md`, `SUPERVISOR.md`, `~/.codex/loop-supervisor.md`, or `~/.claude/SUPERVISOR.md` when present.
+- Audit results append to `audit.log` and are folded into `state.md`, so future cycles and recovery can see whether the previous turn really passed.
+- Guardrails are prompt-level and runner-level: no recursive `/loop` or `/audit`, no loop job mutation unless explicitly requested, no unrelated skill/doc edits, plus the existing run lock, `--count`, idle gate, and optional `--require-end-tag`.
+
+Do not over-apply this. If you need ccc's strongest property, independent review, run a separate auditor session and schedule a companion audit loop against that auditor. Keep provider switching and SDK-fork logic outside this skill unless the user explicitly asks for that architecture.
 
 ## Response Pattern
 

@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+TMI_BIN="${TMI_BIN:-$HOME/.local/bin/tmi}"
+CODEX_SEND_CHECKED_BIN="${CODEX_SEND_CHECKED_BIN:-$HOME/bin/codex_send_checked.sh}"
+CLAUDE_SEND_CHECKED_BIN="${CLAUDE_SEND_CHECKED_BIN:-$HOME/bin/claude_send_checked.sh}"
+
 WINDOW_ID=""
 TITLE_PATTERN=""
 TARGET_TTY=""
@@ -159,18 +163,32 @@ APPLESCRIPT
 is_codex_idle_text() {
   local text="$1"
   local tail_text
-  tail_text="$(printf '%s' "$text" | tail -80)"
-  [[ "$tail_text" == *"› "* ]] || return 1
-  [[ "$tail_text" != *"esc to interrupt"* ]] || return 1
-  [[ "$tail_text" != *"Working ("* ]] || return 1
+  local prompt_line busy_line
+  tail_text="$(printf '%s' "$text" | tail -40)"
+  prompt_line="$(
+    printf '%s\n' "$tail_text" | awk '/› / { n = NR } END { print n + 0 }'
+  )"
+  busy_line="$(
+    printf '%s\n' "$tail_text" | awk '/esc to interrupt|Working \(|Thinking/ { n = NR } END { print n + 0 }'
+  )"
+  (( prompt_line > 0 )) || return 1
+  (( prompt_line > busy_line )) || return 1
   return 0
 }
 
 is_codex_busy_text() {
   local text="$1"
   local tail_text
-  tail_text="$(printf '%s' "$text" | tail -120)"
-  [[ "$tail_text" == *"esc to interrupt"* || "$tail_text" == *"Working ("* || "$tail_text" == *"Thinking"* ]] || return 1
+  local prompt_line busy_line
+  tail_text="$(printf '%s' "$text" | tail -40)"
+  prompt_line="$(
+    printf '%s\n' "$tail_text" | awk '/› / { n = NR } END { print n + 0 }'
+  )"
+  busy_line="$(
+    printf '%s\n' "$tail_text" | awk '/esc to interrupt|Working \(|Thinking/ { n = NR } END { print n + 0 }'
+  )"
+  (( busy_line > 0 )) || return 1
+  (( prompt_line == 0 || busy_line >= prompt_line )) || return 1
   return 0
 }
 
@@ -255,8 +273,39 @@ send_tmux_payload() {
   local payload="$2"
   local press_enter="$3"
   local buffer_name="codex-loop-send-$$-$RANDOM"
+  local pane_state pane_cmd pane_title runtime
 
   tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null
+  pane_state="$("$TMI_BIN" state "$pane" 2>/dev/null || true)"
+  pane_cmd="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null || true)"
+  pane_title="$(tmux display-message -p -t "$pane" '#{pane_title}' 2>/dev/null || true)"
+  runtime="shell"
+
+  if [[ "$pane_state" == *"app=codex"* ]] || [[ "$pane_cmd" == "node" ]] || [[ "$pane_title" =~ [Cc]odex ]]; then
+    runtime="codex"
+  elif [[ "$pane_state" == *"app=claude"* ]] || [[ "$pane_cmd" =~ ^[0-9]+\.[0-9]+ ]] || [[ "$pane_title" =~ (Opus|Sonnet|Haiku|claude|Claude) ]]; then
+    runtime="claude"
+  elif [[ "$pane_state" == *"app=gemini"* ]] || [[ "$pane_title" =~ [Gg]emini ]]; then
+    runtime="gemini"
+  fi
+
+  if [[ "$press_enter" -eq 1 ]]; then
+    case "$runtime" in
+      codex)
+        "$CODEX_SEND_CHECKED_BIN" "$pane" "$payload"
+        return
+        ;;
+      claude)
+        "$CLAUDE_SEND_CHECKED_BIN" --agent claude "$pane" "$payload"
+        return
+        ;;
+      gemini)
+        "$CLAUDE_SEND_CHECKED_BIN" --agent gemini "$pane" "$payload"
+        return
+        ;;
+    esac
+  fi
+
   printf '%s' "$payload" | tmux load-buffer -b "$buffer_name" -
   tmux paste-buffer -p -d -b "$buffer_name" -t "$pane"
   if [[ "$press_enter" -eq 1 ]]; then
