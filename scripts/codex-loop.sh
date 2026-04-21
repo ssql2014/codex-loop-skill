@@ -332,6 +332,179 @@ current_tmux_pane() {
   tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || return 1
 }
 
+tmux_pane_by_tty() {
+  local target_tty="${1:-}"
+  [[ -n "$target_tty" ]] || return 1
+  tmux list-panes -a -F '#{pane_id}	#{pane_tty}' 2>/dev/null | awk -F '\t' -v tty="$target_tty" '$2 == tty { print $1; exit }'
+}
+
+front_terminal_tty() {
+  osascript <<'APPLESCRIPT' 2>/dev/null
+tell application "System Events"
+  set frontApp to name of first application process whose frontmost is true
+end tell
+
+if frontApp is "iTerm2" or frontApp is "iTerm" then
+  tell application "iTerm2"
+    try
+      return tty of current session of current window
+    on error
+      error "No active iTerm session"
+    end try
+  end tell
+else if frontApp is "Terminal" then
+  tell application "Terminal"
+    try
+      return tty of selected tab of front window
+    on error
+      error "No active Terminal tab"
+    end try
+  end tell
+end if
+
+error "Frontmost app is not Terminal or iTerm"
+APPLESCRIPT
+}
+
+discover_target_by_hint() {
+  local hint="${1:-}"
+  [[ -n "$hint" ]] || return 1
+  python3 - "$hint" "$SEND_CURRENT_BIN" <<'PY'
+import subprocess
+import sys
+
+hint = sys.argv[1].strip()
+sender = sys.argv[2]
+if not hint:
+    raise SystemExit(1)
+
+
+def run(argv):
+    return subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def score_text(text: str) -> int:
+    if not text:
+        return -1
+    score = 0
+    if hint in text:
+        score += 100
+    lowered = text.lower()
+    lowered_hint = hint.lower()
+    if lowered_hint in lowered:
+        score += 40
+    if "$loop" in lowered:
+        score += 5
+    if "codex" in lowered or "gpt-5" in lowered:
+        score += 3
+    return score
+
+
+candidates = []
+tmux_ttys = set()
+
+tmux = run(["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_tty}\t#{pane_title}\t#{pane_current_command}"])
+if tmux.returncode == 0:
+    for line in tmux.stdout.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        pane, tty, title, command = parts
+        tmux_ttys.add(tty)
+        tail = run(["tmux", "capture-pane", "-p", "-J", "-S", "-200", "-t", pane])
+        text = tail.stdout
+        score = score_text(text)
+        if command == "node":
+            score += 5
+        if "codex" in title.lower():
+            score += 5
+        if score > 0:
+            candidates.append(("tmux", pane, tty, score))
+
+ps = run(["ps", "-axo", "tty=,command="])
+if ps.returncode == 0:
+    for raw in ps.stdout.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split(None, 1)
+        if len(parts) != 2:
+            continue
+        tty_name, command = parts
+        if "codex" not in command.lower():
+            continue
+        tty = tty_name if tty_name.startswith("/dev/") else f"/dev/{tty_name}"
+        if tty in tmux_ttys:
+            continue
+        content = run([sender, "--tty", tty, "--print-contents", "placeholder"])
+        if content.returncode != 0:
+            continue
+        score = score_text(content.stdout)
+        if score > 0:
+            candidates.append(("tty", tty, tty, score))
+
+if not candidates:
+    raise SystemExit(1)
+
+candidates.sort(key=lambda item: item[3], reverse=True)
+best = candidates[0]
+if len(candidates) > 1 and candidates[1][3] == best[3]:
+    raise SystemExit(2)
+
+print("\t".join(best[:3]))
+PY
+}
+
+resolve_default_terminal_binding() {
+  local hint="${1:-}"
+  local resolved_pane=""
+  local resolved_tty=""
+  local front_tty=""
+  local discovered=""
+
+  resolved_pane="$(current_tmux_pane || true)"
+  if [[ -n "$resolved_pane" ]]; then
+    printf 'tmux%s%s\n' "$FIELD_SEP" "$resolved_pane"
+    return 0
+  fi
+
+  resolved_tty="$(current_tty || true)"
+  if [[ -n "$resolved_tty" ]]; then
+    resolved_pane="$(tmux_pane_by_tty "$resolved_tty" || true)"
+    if [[ -n "$resolved_pane" ]]; then
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$resolved_pane"
+    else
+      printf 'tty%s%s\n' "$FIELD_SEP" "$resolved_tty"
+    fi
+    return 0
+  fi
+
+  front_tty="$(front_terminal_tty || true)"
+  if [[ -n "$front_tty" ]]; then
+    resolved_pane="$(tmux_pane_by_tty "$front_tty" || true)"
+    if [[ -n "$resolved_pane" ]]; then
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$resolved_pane"
+    else
+      printf 'tty%s%s\n' "$FIELD_SEP" "$front_tty"
+    fi
+    return 0
+  fi
+
+  discovered="$(discover_target_by_hint "$hint" || true)"
+  if [[ -n "$discovered" ]]; then
+    local kind value tty_value
+    IFS=$'\t' read -r kind value tty_value <<<"$discovered"
+    if [[ "$kind" == "tmux" ]]; then
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$value"
+    else
+      printf 'tty%s%s\n' "$FIELD_SEP" "$tty_value"
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
 resolve_terminal_target() {
   local mode="$1"
   local window_id="$2"
@@ -1503,9 +1676,17 @@ create_job() {
   validate_bool_flag "$require_end_tag" "--require-end-tag"
   validate_bool_flag "$supervise" "--supervise"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
-    target_tmux_pane="$(current_tmux_pane || true)"
-    if [[ -z "$target_tmux_pane" ]]; then
-      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly. Chat/API calls have no implicit current terminal."
+    local resolved_binding=""
+    local resolved_kind=""
+    local resolved_value=""
+    resolved_binding="$(resolve_default_terminal_binding "$raw_input")" || die "terminal loop could not resolve a live current session; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
+    IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
+    if [[ "$resolved_kind" == "tmux" ]]; then
+      target_tmux_pane="$resolved_value"
+      target_tty=""
+    else
+      target_tty="$resolved_value"
+      target_tmux_pane=""
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
@@ -1722,9 +1903,17 @@ ensure_job() {
   validate_bool_flag "$require_end_tag" "--require-end-tag"
   validate_bool_flag "$supervise" "--supervise"
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
-    target_tmux_pane="$(current_tmux_pane || true)"
-    if [[ -z "$target_tmux_pane" ]]; then
-      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly. Chat/API calls have no implicit current terminal."
+    local resolved_binding=""
+    local resolved_kind=""
+    local resolved_value=""
+    resolved_binding="$(resolve_default_terminal_binding "$raw_input")" || die "terminal loop could not resolve a live current session; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
+    IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
+    if [[ "$resolved_kind" == "tmux" ]]; then
+      target_tmux_pane="$resolved_value"
+      target_tty=""
+    else
+      target_tty="$resolved_value"
+      target_tmux_pane=""
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
