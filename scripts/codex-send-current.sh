@@ -32,9 +32,9 @@ Usage:
   codex-send-current.sh [options] <text>
 
 Options:
-  --window-id ID   Target Terminal window id. Default: current front window.
-  --title-pattern T Resolve the target Terminal window by matching its title.
-  --tty TTY        Resolve and target the Terminal tab with this tty, e.g. /dev/ttys020.
+  --window-id ID   Target Terminal.app window id. Default: current front window.
+  --title-pattern T Resolve the target Terminal.app window by matching its title.
+  --tty TTY        Resolve and target the live terminal session with this tty, e.g. /dev/ttys020. Supports Terminal.app and iTerm.
   --tmux-pane PANE Target a tmux pane directly, e.g. %18. Preferred when the Codex session runs inside tmux.
   --delay SEC      Wait this many seconds before sending. Default: 0
   --background     Spawn a delayed one-shot sender and return immediately.
@@ -62,6 +62,29 @@ front_window_id() {
 tell application "Terminal"
   return (id of front window) as text
 end tell
+APPLESCRIPT
+}
+
+iterm_session_id_by_tty() {
+  local target_tty="$1"
+  osascript - "$target_tty" <<'APPLESCRIPT'
+on run argv
+  set targetTty to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          try
+            if (tty of s as text) is targetTty then
+              return "iterm:" & (id of s as text)
+            end if
+          end try
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches tty: " & targetTty
+end run
 APPLESCRIPT
 }
 
@@ -119,7 +142,10 @@ resolve_window_id() {
   elif [[ -n "$TITLE_PATTERN" ]]; then
     window_id_by_title "$TITLE_PATTERN"
   elif [[ -n "$TARGET_TTY" ]]; then
-    window_id_by_tty "$TARGET_TTY"
+    if window_id_by_tty "$TARGET_TTY" 2>/dev/null; then
+      return 0
+    fi
+    iterm_session_id_by_tty "$TARGET_TTY"
   else
     front_window_id
   fi
@@ -130,6 +156,27 @@ terminal_content() {
   local target_tty="${2:-}"
   if [[ -n "$TARGET_TMUX_PANE" ]]; then
     tmux capture-pane -p -J -S -400 -t "$TARGET_TMUX_PANE"
+    return 0
+  fi
+  if [[ "$wid" == iterm:* ]]; then
+    local session_id="${wid#iterm:}"
+    osascript - "$session_id" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            return (contents of s) as text
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
     return 0
   fi
   osascript - "$wid" "$target_tty" <<'APPLESCRIPT'
@@ -508,6 +555,36 @@ fi
 if [[ -n "$TARGET_TMUX_PANE" ]]; then
   send_tmux_payload "$TARGET_TMUX_PANE" "$TEXT" "$PRESS_ENTER"
   log "sent tmux_pane=$TARGET_TMUX_PANE delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+  exit 0
+fi
+
+if [[ "$WINDOW_ID" == iterm:* ]]; then
+  osascript - "${WINDOW_ID#iterm:}" "$TEXT" "$PRESS_ENTER" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  set payload to item 2 of argv
+  set pressEnter to ((item 3 of argv) as integer)
+
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            if pressEnter is 1 then
+              tell s to write text payload
+            else
+              tell s to write text payload newline NO
+            end if
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
+  log "sent iterm_session=${WINDOW_ID#iterm:} delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
   exit 0
 fi
 

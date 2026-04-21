@@ -14,8 +14,9 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
 4. New loop jobs must target the current visible Codex session by default. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
-5. Treat the default target as "current session only", whether that current session is a tmux pane or the current Terminal.app tab. If the target Codex session is inside tmux, prefer creating the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain Terminal.app tab, create the loop from that tab so `codex-loop` can bind the current TTY. Use `--tmux-pane`, `--tty`, `--window-id`, or `--title-pattern` only when you intentionally want to override the default target.
-6. The background worker only schedules and queues Terminal input. The actual reasoning and tool work happen in the current Terminal Codex session.
+5. Treat the default target as "current session only", whether that current session is a tmux pane or a plain terminal tab. If the target Codex session is inside tmux, prefer creating the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain terminal tab, create the loop from that tab so `codex-loop` can bind the current TTY. `--tty` should resolve real live sessions by TTY for Terminal.app or iTerm. Use `--tmux-pane`, `--tty`, `--window-id`, or `--title-pattern` only when you intentionally want to override the default target.
+6. The background worker only schedules and queues terminal input. The actual reasoning and tool work happen in the current visible Codex session.
+7. A chat/API call does not itself have a current terminal session. If `/loop` is invoked from chat rather than from inside a live terminal, do not guess. Either pass an explicit target or resolve the target session first by TTY/pane.
 
 ## Pre-Send Idle Gate
 
@@ -24,7 +25,7 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 - Only send after the previous turn has produced a final assistant response or the target pane/tab has returned to a prompt-ready idle state.
 - If the target is still running a tool, streaming output, waiting on SSH/test results, or has not emitted a final response, do not paste or press Return; wait and re-check.
 - If idle detection is ambiguous, skip that fire rather than risk appending a prompt into an active turn. Record the skip in the job log.
-- Prefer a terminal-orchestrator/tmux `read/check` style status check for tmux targets, or the loop runner's bound TTY/window idle detector for Terminal tabs. Do not use fixed wall-clock cadence alone as proof of readiness.
+- Prefer a terminal-orchestrator/tmux `read/check` style status check for tmux targets, or the loop runner's bound TTY/session idle detector for plain terminal tabs. Do not use fixed wall-clock cadence alone as proof of readiness.
 - For fragile long-running jobs, use a per-job lock or state file around prompt injection: create it when a turn is sent, clear it only after the turn is observed idle/final, and skip sends while it exists.
 - For session-loop workflows that tag complete conversations with `[start xxx]` and `[end xxx]`, pass `--require-end-tag`. The first cycle may send normally; later cycles must capture the target output and require the latest `[start ...]`/`[end ...]` tag to be an `[end xxx]` tag before sending the next prompt. If the latest tag is a `[start xxx]` or no end tag is visible, skip and retry instead of pasting or pressing Return.
 
@@ -32,14 +33,14 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 
 - Create a loop:
   `codex-loop --cwd "$PWD" -- "<raw loop input>"`
-  Run this from the current tmux pane or current Terminal.app tab when you want the default target.
+  Run this from the current tmux pane or current terminal tab when you want the default target.
 - Ensure one named loop exists and stays reusable:
   `codex-loop ensure --name JOB_NAME --cwd "$PWD" -- "<raw loop input>"`
 - Limit a loop to N runs:
   `codex-loop --count 5 -- "asap continue"`
 - Create or ensure a loop that sends the prompt back into a Terminal Codex session:
   `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
-  Use `--tmux-pane %NN` when the target Codex session is inside tmux; this is preferred over Terminal focus. Use `--tty /dev/ttysNNN` for a Terminal tab outside tmux, or `--title-pattern TEXT` when the Terminal title is stable.
+  Use `--tmux-pane %NN` when the target Codex session is inside tmux; this is preferred over GUI focus. Use `--tty /dev/ttysNNN` for a plain terminal tab outside tmux; `--tty` resolves Terminal.app and iTerm. Use `--title-pattern TEXT` only for Terminal.app windows with stable titles. `--window-id` is a Terminal.app override, not a generic tty/session identifier.
 - Create or ensure a session-tag gated loop:
   `codex-loop ensure --name JOB_NAME --mode terminal --tmux-pane %NN --require-end-tag --cwd "$PWD" -- "<raw loop input>"`
   Use this for recurring Codex sessions that emit `[start xxx]` at the beginning of a full session and `[end xxx]` only after the final response is complete.
@@ -89,14 +90,14 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 ## Behavior
 
-- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. By default the target is only the current Codex session: either the current tmux pane or the current Terminal.app tab/TTY. Explicit target flags are overrides, not the default path. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
+- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. By default the target is only the current Codex session: either the current tmux pane or the current terminal tab/TTY. Explicit target flags are overrides, not the default path. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
   - `asap`: explicit `asap` input such as `asap keep going`; the next run is scheduled immediately, but each terminal send waits for the target to be idle first, then waits for that turn to complete before scheduling the next immediate run. With `--require-end-tag`, it also requires the latest observed session tag to be `[end xxx]` before sending the next cycle. This preserves "never stop" without interrupting the active turn.
 - Jobs live under `$CODEX_LOOP_HOME/jobs/<job_id>/`, defaulting to `~/codex-loop/jobs/<job_id>/`.
 - Named jobs are supported through `--name` plus `ensure`. This is the preferred way to keep one reusable monitor, reminder, or polling loop without spawning duplicates.
-- This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues Terminal injection and uses TTY-bound Terminal contents for post-send idle detection.
+- This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues terminal injection and uses TTY-bound session contents for post-send idle detection.
 - Detached `exec` mode is disabled. Historical jobs with `MODE=exec` are blocked at runtime instead of launching detached Codex.
 - No overlap per job. A loop never spawns multiple concurrent Codex runs for the same job.
 - Reflection is on by default. Each fired prompt asks Codex to include compact `LOOP_REFLECTION_*` lines about objective drift, the loop target, the target project, active skills, prompts, workflow docs, repo instructions, and the next smallest action. Terminal loops read back output to capture reflections; captured reflections are appended to `reflection.log`.
