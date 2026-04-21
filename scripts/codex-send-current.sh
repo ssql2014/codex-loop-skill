@@ -2,9 +2,21 @@
 
 set -euo pipefail
 
-TMI_BIN="${TMI_BIN:-$HOME/.local/bin/tmi}"
-CODEX_SEND_CHECKED_BIN="${CODEX_SEND_CHECKED_BIN:-$HOME/bin/codex_send_checked.sh}"
-CLAUDE_SEND_CHECKED_BIN="${CLAUDE_SEND_CHECKED_BIN:-$HOME/bin/claude_send_checked.sh}"
+TERMINAL_ORCH_DIR="${CODEX_LOOP_TERMINAL_ORCH_DIR:-$HOME/.claude/skills/terminal-orchestrator}"
+
+default_tool_path() {
+  local preferred="$1"
+  local fallback="$2"
+  if [[ -x "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+  printf '%s\n' "$fallback"
+}
+
+TMI_BIN="${TMI_BIN:-$(default_tool_path "$TERMINAL_ORCH_DIR/tmi" "$HOME/.local/bin/tmi")}"
+CODEX_SEND_CHECKED_BIN="${CODEX_SEND_CHECKED_BIN:-$(default_tool_path "$TERMINAL_ORCH_DIR/codex_send_checked.sh" "$HOME/bin/codex_send_checked.sh")}"
+CLAUDE_SEND_CHECKED_BIN="${CLAUDE_SEND_CHECKED_BIN:-$(default_tool_path "$TERMINAL_ORCH_DIR/claude_send_checked.sh" "$HOME/bin/claude_send_checked.sh")}"
 
 WINDOW_ID=""
 TITLE_PATTERN=""
@@ -207,8 +219,39 @@ end run
 APPLESCRIPT
 }
 
+tmux_runtime_state() {
+  [[ -n "$TARGET_TMUX_PANE" ]] || return 1
+  "$TMI_BIN" state "$TARGET_TMUX_PANE" 2>/dev/null || true
+}
+
+tmux_state_is_idle() {
+  local state="${1:-}"
+  [[ "$state" == *"app=codex idle=true"* ]] && return 0
+  [[ "$state" == *"app=claude busy=false"* ]] && return 0
+  [[ "$state" == *"app=gemini busy=false"* ]] && return 0
+  [[ "$state" == *"app=shell idle=true"* ]] && return 0
+  return 1
+}
+
+tmux_state_is_busy() {
+  local state="${1:-}"
+  [[ "$state" == *"app=codex busy=true"* ]] && return 0
+  [[ "$state" == *"app=claude busy=true"* ]] && return 0
+  [[ "$state" == *"app=gemini busy=true"* ]] && return 0
+  [[ "$state" == *"app=shell busy=true"* ]] && return 0
+  return 1
+}
+
 is_codex_idle_text() {
   local text="$1"
+  local tmux_state=""
+  tmux_state="$(tmux_runtime_state || true)"
+  if tmux_state_is_idle "$tmux_state"; then
+    return 0
+  fi
+  if tmux_state_is_busy "$tmux_state"; then
+    return 1
+  fi
   local tail_text
   local prompt_line busy_line
   tail_text="$(printf '%s' "$text" | tail -40)"
@@ -225,6 +268,14 @@ is_codex_idle_text() {
 
 is_codex_busy_text() {
   local text="$1"
+  local tmux_state=""
+  tmux_state="$(tmux_runtime_state || true)"
+  if tmux_state_is_busy "$tmux_state"; then
+    return 0
+  fi
+  if tmux_state_is_idle "$tmux_state"; then
+    return 1
+  fi
   local tail_text
   local prompt_line busy_line
   tail_text="$(printf '%s' "$text" | tail -40)"

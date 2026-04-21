@@ -91,7 +91,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 ## Behavior
 
-- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. By default the target is only the current Codex session: either the current tmux pane or the current terminal tab/TTY. Explicit target flags are overrides, not the default path. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
+- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. By default the target is only the current Codex session: either the current tmux pane or the current terminal tab/TTY. Explicit target flags are overrides, not the default path. For tmux targets, `codex-send-current.sh` delegates submit/verification to the checked sender stack from `terminal-orchestrator` (`tmi`, `codex_send_checked.sh`, `claude_send_checked.sh`) instead of maintaining a second tmux submit path. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.
@@ -111,7 +111,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
   `prompt.txt`, `runtime_prompt.txt`, `audit.log`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
-- The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`; `loop` no longer depends on the separate `auto-continue` skill.
+- The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`. It keeps the plain Terminal/iTerm fallback locally, but the tmux send path should reuse `terminal-orchestrator`'s checked sender stack whenever those tools are available. `loop` no longer depends on the separate `auto-continue` skill.
 
 ## CCC-Style Supervision
 
