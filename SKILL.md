@@ -105,9 +105,9 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - This Codex implementation is still a local background runner, not a native session hook. In `terminal` mode the background runner queues terminal injection and uses TTY-bound session contents for post-send idle detection.
 - Detached `exec` mode is disabled. Historical jobs with `MODE=exec` are blocked at runtime instead of launching detached Codex.
 - No overlap per job. A loop never spawns multiple concurrent Codex runs for the same job.
-- Reflection is on by default. Each fired prompt asks Codex to include compact `LOOP_REFLECTION_*` lines about objective drift, the loop target, the target project, active skills, prompts, workflow docs, repo instructions, and the next smallest action. Terminal loops read back output to capture reflections; captured reflections are appended to `reflection.log`.
-- `state.md` is regenerated from the latest reflection and a short `reflection.log` tail using Hermes-style sections: Goal, Objective Drift Check, Constraints & Preferences, Progress, Key Decisions, Relevant Files, Next Steps, and Critical Context.
-- Reflection may improve relevant user/project skills, prompts, workflow docs, repo instructions, or the loop itself when it finds a concrete defect or high-confidence improvement. Keep self-improvement edits scope-relevant and narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
+- Reflection is off by default. Set `CODEX_LOOP_REFLECTION=1` when you intentionally want compact `LOOP_REFLECTION_*` lines, `reflection.log`, and reflection-derived `state.md` updates for a job.
+- `state.md` is regenerated from audit output and current job metadata when reflection is off, or from the latest reflection plus a short `reflection.log` tail when reflection is on.
+- Reflection-capable jobs may improve relevant user/project skills, prompts, workflow docs, repo instructions, or the loop itself when they find a concrete defect or high-confidence improvement. Keep such edits scope-relevant and narrow, avoid unrelated rewrites, verify the result, and commit changes when the target is a git repo.
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
   `prompt.txt`, `runtime_prompt.txt`, `audit.log`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
@@ -117,7 +117,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 Use `--supervise` when the loop is likely to keep iterating on a task and needs a lightweight stop-check after each turn. This borrows the useful part of `ccc` supervisor behavior, but keeps the loop architecture simple:
 
-- The Codex equivalent of a `stop` hook is the existing post-send idle/final capture. `codex-loop` waits for the target turn to complete, captures the terminal output, then extracts audit/reflection lines.
+- The Codex equivalent of a `stop` hook is the existing post-send idle/final capture. `codex-loop` waits for the target turn to complete, captures the terminal output, then extracts audit lines and, when enabled, reflection lines.
 - `--supervise` adds an inline audit contract to the loop prompt. The target must emit `LOOP_AUDIT_VERDICT=PASS|FAIL|HOLD`, `LOOP_AUDIT_REASON=...`, and `LOOP_AUDIT_NEXT=...`.
 - Criteria are loaded from `--supervisor-file`, or automatically from `.codex/loop-supervisor.md`, `.claude/SUPERVISOR.md`, `SUPERVISOR.md`, `~/.codex/loop-supervisor.md`, or `~/.claude/SUPERVISOR.md` when present.
 - Audit results append to `audit.log` and are folded into `state.md`, so future cycles and recovery can see whether the previous turn really passed.
