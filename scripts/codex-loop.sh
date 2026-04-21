@@ -353,7 +353,7 @@ resolve_terminal_target() {
   elif [[ -n "$target_tty" ]]; then
     "$SEND_CURRENT_BIN" --tty "$target_tty" --print-window-id placeholder
   elif [[ -z "$window_id" && -z "$title_pattern" ]]; then
-    die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane/Terminal tab or pass an explicit override target"
+    die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane or Terminal.app tab, or pass an explicit override target"
   fi
 }
 
@@ -1492,7 +1492,7 @@ create_job() {
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
-      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target Terminal Codex session or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
+      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane or Terminal.app tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
@@ -1714,7 +1714,7 @@ ensure_job() {
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     target_tmux_pane="$(current_tmux_pane || true)"
     if [[ -z "$target_tmux_pane" ]]; then
-      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target Terminal Codex session or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
+      target_tty="$(current_tty)" || die "terminal loop defaults to the current session only; run codex-loop from the target tmux pane or Terminal.app tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
     fi
   fi
   target_window_id="${target_window_id:-$(resolve_terminal_target "$mode" "$target_window_id" "$target_title_pattern" "$target_tty" "$target_tmux_pane")}"
