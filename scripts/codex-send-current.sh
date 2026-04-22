@@ -290,6 +290,26 @@ is_codex_busy_text() {
   return 0
 }
 
+is_codex_queued_text() {
+  local text="$1"
+  printf '%s\n' "$text" | tail -40 | grep -Eq 'tab to queue message|Messages to be submitted after next tool call'
+}
+
+is_codex_interrupted_text() {
+  local text="$1"
+  printf '%s\n' "$text" | tail -40 | grep -Eq 'Conversation interrupted - tell the model what to do differently'
+}
+
+has_codex_draft_prompt() {
+  local text="$1"
+  local tail_text
+  tail_text="$(printf '%s\n' "$text" | tail -40)"
+  grep -Eq '^[[:space:]]*› ' <<<"$tail_text" &&
+    grep -Eq 'gpt-[0-9]|context left|tab to queue message' <<<"$tail_text" &&
+    ! is_codex_busy_text "$tail_text" &&
+    ! is_codex_interrupted_text "$tail_text"
+}
+
 wait_for_idle() {
   local wid="$1"
   local timeout="$2"
@@ -462,12 +482,7 @@ on run argv
       repeat with t in tabs of w
         repeat with s in sessions of t
           if (id of s as text) is targetSessionId then
-            tell w
-              set current tab to t
-            end tell
-            tell t
-              set current session to s
-            end tell
+            select s
             activate
             delay 0.15
             set the clipboard to payload
@@ -506,16 +521,38 @@ on run argv
       repeat with t in tabs of w
         repeat with s in sessions of t
           if (id of s as text) is targetSessionId then
-            tell w
-              set current tab to t
-            end tell
-            tell t
-              set current session to s
-            end tell
+            select s
             activate
             delay 0.1
             tell application "System Events"
               key code 36
+            end tell
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm session matches id: " & targetSessionId
+end run
+APPLESCRIPT
+}
+
+send_iterm_escape() {
+  local session_id="$1"
+  osascript - "$session_id" <<'APPLESCRIPT'
+on run argv
+  set targetSessionId to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s as text) is targetSessionId then
+            select s
+            activate
+            delay 0.1
+            tell application "System Events"
+              key code 53
             end tell
             return
           end if
@@ -734,17 +771,44 @@ if [[ "$WINDOW_ID" == iterm:* ]]; then
     exit 0
   fi
 
-  send_iterm_payload "$session_id" "$TEXT" "$PRESS_ENTER"
-  if wait_for_busy "$WINDOW_ID" "2" >/dev/null 2>&1; then
-    log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=submitted"
-    exit 0
-  fi
+  content_before="$(terminal_content "$WINDOW_ID" "$TARGET_TTY" 2>/dev/null || true)"
+  current="$content_before"
+  prompt_retries=0
+  interrupt_retries=0
 
-  send_iterm_enter "$session_id"
-  if wait_for_busy "$WINDOW_ID" "2" >/dev/null 2>&1; then
-    log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=submitted_after_retry"
-    exit 0
-  fi
+  send_iterm_payload "$session_id" "$TEXT" "$PRESS_ENTER"
+
+  for _attempt in 1 2 3 4 5 6; do
+    sleep 0.5
+    current="$(terminal_content "$WINDOW_ID" "$TARGET_TTY" 2>/dev/null || true)"
+
+    if is_codex_busy_text "$current"; then
+      log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=submitted"
+      exit 0
+    fi
+
+    if is_codex_interrupted_text "$current"; then
+      log "failed iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT status=interrupted"
+      echo "iTerm session interrupted for session $session_id" >&2
+      exit 1
+    fi
+
+    if is_codex_queued_text "$current"; then
+      if (( interrupt_retries < 2 )); then
+        send_iterm_escape "$session_id"
+        interrupt_retries=$((interrupt_retries + 1))
+        continue
+      fi
+    fi
+
+    if [[ "$current" == "$content_before" ]] || has_codex_draft_prompt "$current"; then
+      if (( prompt_retries < 3 )); then
+        send_iterm_enter "$session_id"
+        prompt_retries=$((prompt_retries + 1))
+        continue
+      fi
+    fi
+  done
 
   log "failed iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
   echo "iTerm submit not observed for session $session_id" >&2
