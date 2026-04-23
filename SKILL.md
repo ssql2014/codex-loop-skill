@@ -13,9 +13,9 @@ Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
 1. Decide whether the user wants to create a loop, inspect existing loops, run one immediately, restart a stopped loop, or cancel a loop.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
-4. New loop jobs must target the current visible Codex session by default. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
+4. New loop jobs must target the current visible Codex session by default. Prefer tmux pane targets via `--target self`, `--target %12`, or `--target pane:%14`. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
 5. New loop jobs should execute one first cycle immediately after creation or spec update, then follow their fixed/dynamic/asap schedule after that.
-6. Treat the default target as "current session only", whether that current session is a tmux pane or a plain terminal tab. If the target Codex session is inside tmux, prefer creating the loop from inside that pane so `codex-loop` can bind `TMUX_PANE`. If the target is a plain terminal tab, create the loop from that tab so `codex-loop` can bind the current TTY. `--tty` should resolve real live sessions by TTY for Terminal.app or iTerm. If `/loop` is invoked from chat/API and there is no direct `TMUX_PANE` or attached tty, `codex-loop` should resolve the live current session by tty: first the frontmost Terminal/iTerm session tty, then map that tty back to a tmux pane when possible, and finally fall back to hint-based live session discovery instead of reusing a stale pane id. Use `--tmux-pane`, `--tty`, `--window-id`, or `--title-pattern` only when you intentionally want to override the default target.
+6. Treat tmux panes as the primary target type. Use `--target self` when running from inside the target pane, or pass `--target %NN` / `--target pane:%NN` explicitly. Plain terminal tab targeting by `--tty`, `--window-id`, or `--title-pattern` remains available only as a compatibility fallback when the target is not inside tmux.
 7. The background worker only schedules and queues terminal input. The actual reasoning and tool work happen in the current visible Codex session.
 8. A chat/API call does not itself have a builtin terminal handle. If `/loop` is invoked from chat rather than from inside a live terminal, resolve the target session first by tty/pane: prefer current/frontmost terminal tty, map it to tmux when possible, and only then fall back to hint-based live session discovery. Do not reuse stale hard-coded pane ids as an implicit default.
 
@@ -32,24 +32,25 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 
 ## Commands
 
-- Create a loop:
-  `codex-loop --cwd "$PWD" -- "<raw loop input>"`
-  Run this from the current tmux pane or current terminal tab when you want the default target.
+- Create a loop in the current tmux pane:
+  `codex-loop --cwd "$PWD" --target self -- "<raw loop input>"`
+- Create a loop for another tmux pane:
+  `codex-loop --cwd "$PWD" --target %12 -- "<raw loop input>"`
 - Ensure one named loop exists and stays reusable:
-  `codex-loop ensure --name JOB_NAME --cwd "$PWD" -- "<raw loop input>"`
+  `codex-loop ensure --name JOB_NAME --cwd "$PWD" --target self -- "<raw loop input>"`
 - Limit a loop to N runs:
   `codex-loop --count 5 -- "asap continue"`
-- Create or ensure a loop that sends the prompt back into a Terminal Codex session:
-  `codex-loop ensure --name JOB_NAME --mode terminal --window-id WINDOW_ID --cwd "$PWD" -- "<raw loop input>"`
-  Use `--tmux-pane %NN` when the target Codex session is inside tmux; this is preferred over GUI focus. Use `--tty /dev/ttysNNN` for a plain terminal tab outside tmux; `--tty` resolves Terminal.app and iTerm. Use `--title-pattern TEXT` only for Terminal.app windows with stable titles. `--window-id` is a Terminal.app override, not a generic tty/session identifier.
+- Create or ensure a loop that sends the prompt back into a tmux Codex session:
+  `codex-loop ensure --name JOB_NAME --mode terminal --target %NN --cwd "$PWD" -- "<raw loop input>"`
+  Use `--target self` for the current tmux pane. Use `--target %NN` or `--target pane:%NN` for another tmux pane. Only use `--tty /dev/ttysNNN`, `--title-pattern TEXT`, or `--window-id WINDOW_ID` when the target is a plain terminal tab outside tmux.
 - Create or ensure a session-tag gated loop:
-  `codex-loop ensure --name JOB_NAME --mode terminal --tmux-pane %NN --require-end-tag --cwd "$PWD" -- "<raw loop input>"`
+  `codex-loop ensure --name JOB_NAME --mode terminal --target %NN --require-end-tag --cwd "$PWD" -- "<raw loop input>"`
   Use this for recurring Codex sessions that emit `[start xxx]` at the beginning of a full session and `[end xxx]` only after the final response is complete.
 - Create or ensure a CCC-inspired supervised loop:
   `codex-loop ensure --name JOB_NAME --supervise --supervisor-file .codex/loop-supervisor.md --cwd "$PWD" -- "<raw loop input>"`
   This appends an inline stop-check to every loop prompt and records `LOOP_AUDIT_*` lines in `audit.log` and `state.md`. It is intentionally not a separate model fork.
 - Create a companion audit loop when independent review matters:
-  `codex-loop ensure --name JOB_NAME-audit --mode terminal --tmux-pane %AUDITOR --cwd "$PWD" -- "5m /audit %TARGET <criteria>"`
+  `codex-loop ensure --name JOB_NAME-audit --mode terminal --target %AUDITOR --cwd "$PWD" -- "5m /audit %TARGET <criteria>"`
   Prefer a separate auditor pane/session for this pattern. Do not point an audit loop at the same busy target unless the prompt is purely read-only and idle-gated.
 - List loops:
   `codex-loop list`
@@ -91,7 +92,7 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 
 ## Behavior
 
-- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. By default the target is only the current Codex session: either the current tmux pane or the current terminal tab/TTY. Explicit target flags are overrides, not the default path. When no direct tty/pane is attached, `codex-loop` resolves the live session by tty first and maps that tty back to a tmux pane when possible; it should not silently reuse an unrelated historical pane. For tmux targets, `codex-send-current.sh` delegates submit/verification to the checked sender stack from `terminal-orchestrator` (`tmi`, `codex_send_checked.sh`, `claude_send_checked.sh`) instead of maintaining a second tmux submit path. This is the closest local approximation of Claude's native `/loop` session behavior because the work stays in the visible Codex conversation.
+- Default `terminal` mode: each loop fire pastes the parsed prompt into the bound target and presses Return via `codex-send-current.sh`. The preferred target is a tmux pane selected by `--target self|current|%NN|pane:%NN`. For tmux targets, `codex-send-current.sh` delegates submit/verification to the checked sender stack from `terminal-orchestrator` (`tmi`, `codex_send_checked.sh`, `claude_send_checked.sh`) instead of maintaining a second tmux submit path. Plain terminal tabs remain a fallback through `--tty`, `--window-id`, or `--title-pattern`.
 - Schedule modes:
   - `fixed`: explicit intervals such as `5m check deploy` or `check deploy every 2 hours`.
   - `dynamic`: prompt-only input such as `check deploy`; Codex chooses the next 1m-1h delay after each run, falling back to 10m if no valid delay is emitted.

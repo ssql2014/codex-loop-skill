@@ -23,13 +23,13 @@ REFLECTION_ENABLED="${CODEX_LOOP_REFLECTION:-0}"
 usage() {
   cat <<'EOF'
 Usage:
-  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--target self|current|%PANE|pane:%PANE] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop 5m check the deploy and summarize status
   codex-loop check the deploy every 20m
   codex-loop check the deploy
   codex-loop asap check the deploy and immediately continue after each run
   codex-loop
-  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
+  codex-loop ensure --name JOB_NAME [--cwd PATH] [--start-now] [--count N] [--mode terminal] [--require-end-tag] [--supervise] [--supervisor-file PATH] [--target self|current|%PANE|pane:%PANE] [--window-id ID|--title-pattern TEXT|--tty TTY|--tmux-pane PANE] -- "<loop prompt>"
   codex-loop list
   codex-loop show JOB_ID
   codex-loop run-now JOB_ID
@@ -38,7 +38,9 @@ Usage:
   codex-loop parse "<loop prompt>"
 
 Examples:
-  codex-loop --cwd "$PWD" -- "5m check the deploy and summarize status"
+  codex-loop --cwd "$PWD" --target self -- "5m check the deploy and summarize status"
+  codex-loop --target %12 -- "10m summarize the current status"
+  codex-loop --target pane:%14 -- "asap continue until blocked"
   codex-loop "check pane 35 every 10 minutes"
   codex-loop "check whether CI passed and address review comments"
   codex-loop "asap keep improving this issue until blocked"
@@ -46,7 +48,7 @@ Examples:
   codex-loop "15m"
   codex-loop
   codex-loop ensure --name deploy-watch --cwd "$PWD" -- "5m check the deploy"
-  codex-loop ensure --name current-audit --mode terminal --window-id 40000 -- "10m audit the live evas session"
+  codex-loop ensure --name current-audit --mode terminal --target %12 -- "10m audit the live evas session"
   codex-loop ensure --name guarded-fix --supervise --supervisor-file .codex/loop-supervisor.md -- "asap continue until the issue is fixed"
   codex-loop list
   codex-loop show ab12cd34
@@ -330,6 +332,31 @@ current_tmux_pane() {
   local pane="${TMUX_PANE:-}"
   [[ -n "$pane" ]] || return 1
   tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null || return 1
+}
+
+resolve_target_spec() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || return 1
+  case "$target" in
+    self|current)
+      local pane=""
+      pane="$(current_tmux_pane || true)"
+      [[ -n "$pane" ]] || die "--target $target requires running codex-loop from inside the target tmux pane"
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$pane"
+      ;;
+    pane:%*)
+      local pane="${target#pane:}"
+      tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 || die "tmux pane not found: $pane"
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$pane"
+      ;;
+    %*)
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || die "tmux pane not found: $target"
+      printf 'tmux%s%s\n' "$FIELD_SEP" "$target"
+      ;;
+    *)
+      die "unsupported --target '$target'; use self, current, %PANE, or pane:%PANE"
+      ;;
+  esac
 }
 
 tmux_pane_by_tty() {
@@ -1565,6 +1592,7 @@ create_job() {
   local start_now=0
   local job_name=""
   local mode="$DEFAULT_MODE"
+  local target_spec=""
   local target_window_id=""
   local target_title_pattern=""
   local target_tty=""
@@ -1606,6 +1634,12 @@ create_job() {
       --terminal|--current-terminal)
         mode="terminal"
         shift
+        ;;
+      --target)
+        [[ $# -ge 2 ]] || die "--target requires a value"
+        mode="terminal"
+        target_spec="$2"
+        shift 2
         ;;
       --window-id)
         [[ $# -ge 2 ]] || die "--window-id requires a value"
@@ -1675,6 +1709,20 @@ create_job() {
   validate_non_negative_number "$send_delay" "--send-delay"
   validate_bool_flag "$require_end_tag" "--require-end-tag"
   validate_bool_flag "$supervise" "--supervise"
+  if [[ -n "$target_spec" && ( -n "$target_window_id" || -n "$target_title_pattern" || -n "$target_tty" || -n "$target_tmux_pane" ) ]]; then
+    die "--target is mutually exclusive with --window-id, --title-pattern, --tty, and --tmux-pane"
+  fi
+  if [[ -n "$target_spec" ]]; then
+    local resolved_binding=""
+    local resolved_kind=""
+    local resolved_value=""
+    resolved_binding="$(resolve_target_spec "$target_spec")"
+    IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
+    if [[ "$resolved_kind" == "tmux" ]]; then
+      target_tmux_pane="$resolved_value"
+      target_tty=""
+    fi
+  fi
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     local resolved_binding=""
     local resolved_kind=""
@@ -1789,6 +1837,7 @@ ensure_job() {
   local start_now=0
   local job_name=""
   local mode="$DEFAULT_MODE"
+  local target_spec=""
   local target_window_id=""
   local target_title_pattern=""
   local target_tty=""
@@ -1830,6 +1879,12 @@ ensure_job() {
       --terminal|--current-terminal)
         mode="terminal"
         shift
+        ;;
+      --target)
+        [[ $# -ge 2 ]] || die "--target requires a value"
+        mode="terminal"
+        target_spec="$2"
+        shift 2
         ;;
       --window-id)
         [[ $# -ge 2 ]] || die "--window-id requires a value"
@@ -1902,6 +1957,20 @@ ensure_job() {
   validate_non_negative_number "$send_delay" "--send-delay"
   validate_bool_flag "$require_end_tag" "--require-end-tag"
   validate_bool_flag "$supervise" "--supervise"
+  if [[ -n "$target_spec" && ( -n "$target_window_id" || -n "$target_title_pattern" || -n "$target_tty" || -n "$target_tmux_pane" ) ]]; then
+    die "--target is mutually exclusive with --window-id, --title-pattern, --tty, and --tmux-pane"
+  fi
+  if [[ -n "$target_spec" ]]; then
+    local resolved_binding=""
+    local resolved_kind=""
+    local resolved_value=""
+    resolved_binding="$(resolve_target_spec "$target_spec")"
+    IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
+    if [[ "$resolved_kind" == "tmux" ]]; then
+      target_tmux_pane="$resolved_value"
+      target_tty=""
+    fi
+  fi
   if [[ "$mode" == "terminal" && -z "$target_window_id" && -z "$target_title_pattern" && -z "$target_tty" && -z "$target_tmux_pane" ]]; then
     local resolved_binding=""
     local resolved_kind=""
