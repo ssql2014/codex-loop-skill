@@ -245,6 +245,11 @@ tmux_state_is_busy() {
 is_codex_idle_text() {
   local text="$1"
   local tmux_state=""
+  local tail_text
+  tail_text="$(printf '%s\n' "$text" | tail -40)"
+  if is_codex_interrupted_text "$tail_text" || is_codex_queued_text "$tail_text"; then
+    return 1
+  fi
   tmux_state="$(tmux_runtime_state || true)"
   if tmux_state_is_idle "$tmux_state"; then
     return 0
@@ -252,9 +257,10 @@ is_codex_idle_text() {
   if tmux_state_is_busy "$tmux_state"; then
     return 1
   fi
-  local tail_text
+  if has_codex_active_prompt_draft "$tail_text"; then
+    return 1
+  fi
   local prompt_line busy_line
-  tail_text="$(printf '%s' "$text" | tail -40)"
   prompt_line="$(
     printf '%s\n' "$tail_text" | awk '/› / { n = NR } END { print n + 0 }'
   )"
@@ -292,20 +298,59 @@ is_codex_busy_text() {
 
 is_codex_queued_text() {
   local text="$1"
-  printf '%s\n' "$text" | tail -40 | grep -Eq 'tab to queue message|Messages to be submitted after next tool call'
+  printf '%s\n' "$text" | tail -8 | grep -Eq 'tab to queue message|Messages to be submitted after next tool call'
 }
 
 is_codex_interrupted_text() {
   local text="$1"
-  printf '%s\n' "$text" | tail -40 | grep -Eq 'Conversation interrupted - tell the model what to do differently'
+  printf '%s\n' "$text" | tail -8 | grep -Eq 'Conversation interrupted - tell the model what to do differently|Model interrupted to submit steer instructions\.'
+}
+
+has_codex_nonempty_prompt_draft() {
+  local text="$1"
+  printf '%s\n' "$text" | tail -40 | awk '
+    /^[[:space:]]*›[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*›[[:space:]]*/, "", line)
+      if (line ~ /[^[:space:]]/) {
+        found = 1
+      }
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  '
+}
+
+has_codex_active_prompt_draft() {
+  local text="$1"
+  local bottom_text
+  bottom_text="$(printf '%s\n' "$text" | tail -8)"
+  printf '%s\n' "$bottom_text" | awk '
+    /^[[:space:]]*›[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*›[[:space:]]*/, "", line)
+      if (line ~ /[^[:space:]]/) {
+        prompt = NR
+      }
+    }
+    /gpt-[0-9]|context left|tab to queue message/ {
+      status = NR
+    }
+    END {
+      if (prompt > 0 && status > 0 && prompt < status && (status - prompt) <= 3) {
+        exit 0
+      }
+      exit 1
+    }
+  '
 }
 
 has_codex_draft_prompt() {
   local text="$1"
   local tail_text
   tail_text="$(printf '%s\n' "$text" | tail -40)"
-  grep -Eq '^[[:space:]]*› ' <<<"$tail_text" &&
-    grep -Eq 'gpt-[0-9]|context left|tab to queue message' <<<"$tail_text" &&
+  has_codex_active_prompt_draft "$tail_text" &&
     ! is_codex_busy_text "$tail_text" &&
     ! is_codex_interrupted_text "$tail_text"
 }
@@ -760,6 +805,7 @@ fi
 if [[ -n "$TARGET_TMUX_PANE" ]]; then
   send_tmux_payload "$TARGET_TMUX_PANE" "$TEXT" "$PRESS_ENTER"
   log "sent tmux_pane=$TARGET_TMUX_PANE delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+  printf 'status=submitted\n'
   exit 0
 fi
 
@@ -768,6 +814,7 @@ if [[ "$WINDOW_ID" == iterm:* ]]; then
   if [[ "$PRESS_ENTER" -eq 0 ]]; then
     send_iterm_payload "$session_id" "$TEXT" "$PRESS_ENTER"
     log "sent iterm_session=$session_id delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+    printf 'status=submitted\n'
     exit 0
   fi
 
@@ -884,3 +931,4 @@ end run
 APPLESCRIPT
 
 log "sent window_id=$WINDOW_ID delay=$DELAY_SEC enter=$PRESS_ENTER text=$TEXT"
+printf 'status=submitted\n'

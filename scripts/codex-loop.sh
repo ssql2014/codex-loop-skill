@@ -9,8 +9,10 @@ SEND_CURRENT_BIN_DEFAULT="$SCRIPT_DIR/codex-send-current.sh"
 SEND_CURRENT_BIN="${CODEX_LOOP_SEND_CURRENT_BIN:-$SEND_CURRENT_BIN_DEFAULT}"
 DEFAULT_MODE="terminal"
 TERMINAL_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_IDLE_TIMEOUT:-0}"
+TERMINAL_PRE_SEND_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_PRE_SEND_IDLE_TIMEOUT:-45}"
+TERMINAL_GATE_IDLE_TIMEOUT="${CODEX_LOOP_TERMINAL_GATE_IDLE_TIMEOUT:-15}"
 TERMINAL_AFTER_SEND_DELAY="${CODEX_LOOP_TERMINAL_AFTER_SEND_DELAY:-2}"
-TERMINAL_ASAP_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT:-0}"
+TERMINAL_ASAP_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT:-900}"
 TERMINAL_TURN_TIMEOUT="${CODEX_LOOP_TERMINAL_TURN_TIMEOUT:-900}"
 TERMINAL_REQUIRE_END_TAG_DEFAULT="${CODEX_LOOP_TERMINAL_REQUIRE_END_TAG:-0}"
 DEFAULT_PROMPT_SENTINEL="__CODEX_LOOP_DEFAULT_PROMPT__"
@@ -276,6 +278,24 @@ bool_enabled() {
   esac
 }
 
+timeout_is_zero() {
+  local value="${1:-0}"
+  case "$value" in
+    0|0.0|0.00|0.000) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+effective_idle_timeout() {
+  local configured="${1:-0}"
+  local fallback="${2:-0}"
+  if timeout_is_zero "$configured"; then
+    printf '%s' "$fallback"
+  else
+    printf '%s' "$configured"
+  fi
+}
+
 validate_bool_flag() {
   local value="${1:-0}"
   local label="$2"
@@ -302,6 +322,12 @@ last_message_has_end_tag() {
   ' "$file"
 }
 
+last_send_was_submitted() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  grep -Eq '^status=submitted$' "$file"
+}
+
 schedule_end_tag_retry() {
   local jobdir="$1"
   local note="$2"
@@ -313,6 +339,22 @@ schedule_end_tag_retry() {
   NEXT_RUN_AT="$(epoch_to_local "$NEXT_RUN_EPOCH")"
   LAST_NOTE="$note; retry after ${seconds}s"
   save_job "$jobdir"
+}
+
+validate_asap_target_safety() {
+  local schedule_mode="$1"
+  local mode="$2"
+  local binding_was_default="$3"
+  local max_runs="$4"
+  local require_end_tag="$5"
+
+  [[ "$schedule_mode" == "asap" ]] || return 0
+  [[ "$mode" == "terminal" ]] || return 0
+  [[ "$binding_was_default" == "1" ]] || return 0
+  [[ "$max_runs" == "0" ]] || return 0
+  bool_enabled "$require_end_tag" && return 0
+
+  die "refusing unsafe implicit current-pane asap loop without --count or --require-end-tag; pass an explicit target, add --count N for bounded testing, or enable --require-end-tag for session loops"
 }
 
 validate_positive_integer() {
@@ -1257,7 +1299,7 @@ job_display_status() {
   local jobdir="$1"
   load_job "$jobdir"
   if [[ "${STATUS:-}" == "active" ]]; then
-    if pid_alive "${CURRENT_CHILD_PID:-}"; then
+    if pid_alive "${CURRENT_CHILD_PID:-}" || { [[ -n "${LAST_RUN_STARTED_AT:-}" ]] && [[ -z "${LAST_RUN_FINISHED_AT:-}" ]] && pid_alive "${PID:-}"; }; then
       printf 'running'
     elif pid_alive "${PID:-}"; then
       printf 'scheduled'
@@ -1383,14 +1425,18 @@ run_job_once() {
   local json_file="$jobdir/last_run.jsonl"
   local last_message_file="$jobdir/last_message.txt"
   local stderr_file="$jobdir/stderr.log"
-  local started_at prompt_preview child_pid rc
+    local started_at prompt_preview child_pid rc last_send_submitted
   local mode="${MODE:-terminal}"
   build_effective_prompt "$jobdir" >"$prompt_file"
 
   if [[ "$mode" == "terminal" ]]; then
-    local -a target_cmd=("$SEND_CURRENT_BIN" --idle-timeout "$TERMINAL_IDLE_TIMEOUT")
+    local pre_send_idle_timeout gate_idle_timeout
+    local -a target_cmd=("$SEND_CURRENT_BIN")
     local -a send_cmd=()
     local capture_terminal_output=0
+
+    pre_send_idle_timeout="$(effective_idle_timeout "$TERMINAL_IDLE_TIMEOUT" "$TERMINAL_PRE_SEND_IDLE_TIMEOUT")"
+    gate_idle_timeout="$(effective_idle_timeout "$TERMINAL_IDLE_TIMEOUT" "$TERMINAL_GATE_IDLE_TIMEOUT")"
 
     [[ -x "$SEND_CURRENT_BIN" ]] || die "terminal mode requires sender: $SEND_CURRENT_BIN"
 
@@ -1406,12 +1452,10 @@ run_job_once() {
     fi
     send_cmd=("${target_cmd[@]}" --delay "${SEND_DELAY:-0}" --stdin)
     if [[ "${SCHEDULE_MODE:-fixed}" == "dynamic" ]]; then
-      send_cmd+=(--wait-for-idle)
       capture_terminal_output=1
     elif [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
       # ASAP means "send as soon as the current Codex turn is idle", not
       # "append to whatever is currently being typed or processed".
-      send_cmd+=(--wait-for-idle)
       capture_terminal_output=1
     elif [[ "${REFLECTION:-$REFLECTION_ENABLED}" != "0" ]]; then
       capture_terminal_output=1
@@ -1419,12 +1463,9 @@ run_job_once() {
     if bool_enabled "${REQUIRE_END_TAG:-0}"; then
       capture_terminal_output=1
     fi
-    if (( capture_terminal_output )) && [[ "${SCHEDULE_MODE:-fixed}" == "fixed" ]]; then
-      # Fixed terminal loops with reflection still need the same pre-send idle
-      # gate as dynamic/asap loops. Without this, the prompt can be pasted into
-      # an active TUI turn, and post-send detection becomes unreliable.
-      send_cmd+=(--wait-for-idle)
-    fi
+    # Terminal-mode loops must never paste into an active turn. This idle gate
+    # applies to fixed, dynamic, and asap schedules alike.
+    send_cmd+=(--wait-for-idle --idle-timeout "$pre_send_idle_timeout")
 
     started_at="$(now_iso)"
     LAST_RUN_STARTED_AT="$started_at"
@@ -1439,7 +1480,7 @@ run_job_once() {
     if bool_enabled "${REQUIRE_END_TAG:-0}" && [[ "${RUN_COUNT:-0}" != "0" ]]; then
       local gate_rc gate_note
       set +e
-      "${target_cmd[@]}" --idle-timeout "$TERMINAL_IDLE_TIMEOUT" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+      "${target_cmd[@]}" --idle-timeout "$gate_idle_timeout" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
       gate_rc="$?"
       set -e
       if [[ "$gate_rc" -ne 0 ]]; then
@@ -1480,7 +1521,11 @@ run_job_once() {
 
     load_job "$jobdir"
     CURRENT_CHILD_PID=""
-    RUN_COUNT=$((RUN_COUNT + 1))
+    last_send_submitted=0
+    if last_send_was_submitted "$json_file"; then
+      last_send_submitted=1
+      RUN_COUNT=$((RUN_COUNT + 1))
+    fi
     LAST_RUN_FINISHED_AT="$(now_iso)"
     LAST_EXIT_CODE="$rc"
 
@@ -1488,7 +1533,11 @@ run_job_once() {
       if [[ "${SCHEDULE_MODE:-fixed}" == "asap" ]]; then
         sleep "$TERMINAL_AFTER_SEND_DELAY"
         set +e
-        "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
+        if [[ -n "${TARGET_TMUX_PANE:-}" ]]; then
+          "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_TURN_TIMEOUT" --wait-idle-only --print-contents >"$last_message_file" 2>>"$stderr_file"
+        else
+          "${target_cmd[@]}" --idle-timeout "$TERMINAL_ASAP_TURN_TIMEOUT" --wait-idle-only --require-busy-first --print-contents >"$last_message_file" 2>>"$stderr_file"
+        fi
         rc="$?"
         set -e
         LAST_EXIT_CODE="$rc"
@@ -1597,6 +1646,7 @@ create_job() {
   local target_title_pattern=""
   local target_tty=""
   local target_tmux_pane=""
+  local binding_was_default="0"
   local send_delay="0"
   local max_runs="0"
   local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
@@ -1727,6 +1777,7 @@ create_job() {
     local resolved_binding=""
     local resolved_kind=""
     local resolved_value=""
+    binding_was_default="1"
     resolved_binding="$(resolve_default_terminal_binding "$raw_input")" || die "terminal loop could not resolve a live current session; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
     IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
     if [[ "$resolved_kind" == "tmux" ]]; then
@@ -1751,6 +1802,7 @@ create_job() {
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
   IFS="$FIELD_SEP" read -r interval_input interval_seconds interval_label prompt note schedule_mode prompt_source <<<"$parsed"
+  validate_asap_target_safety "$schedule_mode" "$mode" "$binding_was_default" "$max_runs" "$require_end_tag"
 
   local job_id jobdir
   while true; do
@@ -1842,6 +1894,7 @@ ensure_job() {
   local target_title_pattern=""
   local target_tty=""
   local target_tmux_pane=""
+  local binding_was_default="0"
   local send_delay="0"
   local max_runs="0"
   local require_end_tag="$TERMINAL_REQUIRE_END_TAG_DEFAULT"
@@ -1975,6 +2028,7 @@ ensure_job() {
     local resolved_binding=""
     local resolved_kind=""
     local resolved_value=""
+    binding_was_default="1"
     resolved_binding="$(resolve_default_terminal_binding "$raw_input")" || die "terminal loop could not resolve a live current session; run codex-loop from the target tmux pane or live terminal tab, or pass --tmux-pane/--tty/--window-id/--title-pattern explicitly"
     IFS="$FIELD_SEP" read -r resolved_kind resolved_value <<<"$resolved_binding"
     if [[ "$resolved_kind" == "tmux" ]]; then
@@ -1999,6 +2053,7 @@ ensure_job() {
   local parsed interval_input interval_seconds interval_label prompt note schedule_mode prompt_source
   parsed="$(parse_loop_input "$raw_input")"
   IFS="$FIELD_SEP" read -r interval_input interval_seconds interval_label prompt note schedule_mode prompt_source <<<"$parsed"
+  validate_asap_target_safety "$schedule_mode" "$mode" "$binding_was_default" "$max_runs" "$require_end_tag"
 
   local selected=""
   local selected_prompt=""

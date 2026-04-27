@@ -1,23 +1,25 @@
 ---
 name: loop
-description: Schedule recurring Codex prompts with Claude-style /loop syntax. Use when the user asks to create, list, inspect, restart, or cancel periodic prompt jobs, recurring reminders, polling loops, asap loops, dynamic loops, or a generic replacement for one-off cron watchers. Accepts inputs like `5m check deploy`, `check deploy every 2 hours`, `asap keep going`, or no interval for the default maintenance loop.
+description: "Schedule recurring or ASAP Codex prompts to tmux panes; list, inspect, restart, and cancel loop jobs."
 user-invocable: true
 ---
 
 # Loop
 
-Use this skill when the user wants Claude Code style `/loop` behavior in Codex.
+Use this skill when the user wants loop behavior in Codex. In Codex panes the
+user-facing command is `$loop`; references to `/loop` describe the equivalent
+Claude-style surface syntax.
 
 ## Workflow
 
 1. Decide whether the user wants to create a loop, inspect existing loops, run one immediately, restart a stopped loop, or cancel a loop.
 2. Use the bundled `codex-loop` wrapper instead of re-implementing parsing by hand.
 3. Prefer the current working directory as the loop's `--cwd` unless the user explicitly points at another project.
-4. New loop jobs must target the current visible Codex session by default. Prefer tmux pane targets via `--target self`, `--target %12`, or `--target pane:%14`. Do not use detached `exec` mode; the goal is to mimic Claude `/loop` by queuing work back into the visible session.
+4. New loop jobs must target the current visible Codex session by default. Prefer tmux pane targets via `--target self`, `--target %12`, or `--target pane:%14`. Do not use detached `exec` mode; the goal is to mimic the interactive loop command by queuing work back into the visible session.
 5. New loop jobs should execute one first cycle immediately after creation or spec update, then follow their fixed/dynamic/asap schedule after that.
 6. Treat tmux panes as the primary target type. Use `--target self` when running from inside the target pane, or pass `--target %NN` / `--target pane:%NN` explicitly. Plain terminal tab targeting by `--tty`, `--window-id`, or `--title-pattern` remains available only as a compatibility fallback when the target is not inside tmux.
 7. The background worker only schedules and queues terminal input. The actual reasoning and tool work happen in the current visible Codex session.
-8. A chat/API call does not itself have a builtin terminal handle. If `/loop` is invoked from chat rather than from inside a live terminal, resolve the target session first by tty/pane: prefer current/frontmost terminal tty, map it to tmux when possible, and only then fall back to hint-based live session discovery. Do not reuse stale hard-coded pane ids as an implicit default.
+8. A chat/API call does not itself have a builtin terminal handle. If `$loop` is invoked from chat rather than from inside a live terminal, resolve the target session first by tty/pane: prefer current/frontmost terminal tty, map it to tmux when possible, and only then fall back to hint-based live session discovery. Do not reuse stale hard-coded pane ids as an implicit default.
 
 ## Pre-Send Idle Gate
 
@@ -69,7 +71,8 @@ Before sending a loop prompt into a Terminal/tmux Codex target, treat idle detec
 
 ## Input Syntax
 
-Mirror Claude's `/loop` surface syntax:
+Mirror Claude's `/loop` surface syntax. In Codex the interactive spelling is
+`$loop` with the same raw arguments:
 
 - `5m check the deploy`
 - `check the deploy every 20m`
@@ -86,9 +89,13 @@ Prompt-only input uses Claude-style dynamic scheduling: the loop executes one fi
 
 `asap` mode schedules the next iteration immediately, but terminal mode still waits until the bound target appears idle before injecting the prompt. If `--require-end-tag` is enabled, terminal mode also waits until the latest session tag is `[end xxx]`. This avoids appending a new prompt into an active Codex turn. After sending, ASAP waits for the turn to go busy and then idle again before scheduling the next immediate fire. The turn wait defaults to no timeout and can be bounded with `CODEX_LOOP_TERMINAL_ASAP_TURN_TIMEOUT`.
 
+Safety rule: when the target is resolved implicitly to the current/frontmost pane, unbounded `asap` loops are refused unless you add `--count N` or `--require-end-tag`. This prevents accidental takeover of the pane you are actively using.
+
 If the user gives only an interval and no prompt, use the default maintenance prompt. Resolve it from `.claude/loop.md` in the loop working directory, then `~/.claude/loop.md`, then the built-in maintenance prompt.
 
-When the user invokes the skill as `/loop ...`, pass the raw argument string through unchanged. Do not force an extra `create` verb.
+When the user invokes the skill as `$loop ...` in Codex or `/loop ...` in
+Claude, pass the raw argument string through unchanged. Do not force an extra
+`create` verb.
 
 ## Behavior
 
@@ -112,6 +119,8 @@ When the user invokes the skill as `/loop ...`, pass the raw argument string thr
 - Seconds are rounded up to one minute for fixed intervals. `asap` is the exception and intentionally uses a 0-second delay.
 - Debug with the per-job artifacts:
   `prompt.txt`, `runtime_prompt.txt`, `audit.log`, `reflection.log`, `state.md`, `run.log`, `stderr.log`, `last_message.txt`, `last_run.jsonl`
+- Validate asap behavior with the bundled smoke test:
+  `~/.codex/skills/loop/scripts/smoke-test-asap.sh`
 - The Terminal sender is vendored inside this skill at `scripts/codex-send-current.sh`. It keeps the plain Terminal/iTerm fallback locally, but the tmux send path should reuse `terminal-orchestrator`'s checked sender stack whenever those tools are available. `loop` no longer depends on the separate `auto-continue` skill.
 
 ## CCC-Style Supervision
@@ -122,7 +131,10 @@ Use `--supervise` when the loop is likely to keep iterating on a task and needs 
 - `--supervise` adds an inline audit contract to the loop prompt. The target must emit `LOOP_AUDIT_VERDICT=PASS|FAIL|HOLD`, `LOOP_AUDIT_REASON=...`, and `LOOP_AUDIT_NEXT=...`.
 - Criteria are loaded from `--supervisor-file`, or automatically from `.codex/loop-supervisor.md`, `.claude/SUPERVISOR.md`, `SUPERVISOR.md`, `~/.codex/loop-supervisor.md`, or `~/.claude/SUPERVISOR.md` when present.
 - Audit results append to `audit.log` and are folded into `state.md`, so future cycles and recovery can see whether the previous turn really passed.
-- Guardrails are prompt-level and runner-level: no recursive `/loop` or `/audit`, no loop job mutation unless explicitly requested, no unrelated skill/doc edits, plus the existing run lock, `--count`, idle gate, and optional `--require-end-tag`.
+- Guardrails are prompt-level and runner-level: no recursive `$loop`/`$audit`
+  or `/loop`/`/audit`, no loop job mutation unless explicitly requested, no
+  unrelated skill/doc edits, plus the existing run lock, `--count`, idle gate,
+  and optional `--require-end-tag`.
 
 Do not over-apply this. If you need ccc's strongest property, independent review, run a separate auditor session and schedule a companion audit loop against that auditor. Keep provider switching and SDK-fork logic outside this skill unless the user explicitly asks for that architecture.
 
